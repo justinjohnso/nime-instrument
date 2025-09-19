@@ -10,6 +10,7 @@
 #include "DaisyDuino.h"
 
 const int VOLUME_PIN = A7;
+const int VOLUME_CHANGE_THRESHOLD = 10; // Keep volume reading from being too noisy
 int lastVolumeRaw = -1;
 
 const int NUM_BUTTONS = 7;
@@ -32,7 +33,7 @@ void setup() {
 void loop() {
   int volumeRaw = analogRead(VOLUME_PIN);
   
-  if (volumeRaw != lastVolumeRaw); {
+  if (abs((volumeRaw - lastVolumeRaw)) > VOLUME_CHANGE_THRESHOLD) {
     float volumePercent = (volumeRaw / 1023.0) * 100; 
     Serial.print("Volume: ");
     Serial.print(volumePercent, 1);
