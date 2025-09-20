@@ -2,17 +2,20 @@
 #include <Adafruit_VL53L0X.h>
 
 DaisyHardware hw;
-Oscillator osc;
+Oscillator osc[8];
+Overdrive distortion;
 
 // Volume pot
-const int VOLUME_PIN = A7;
+const int VOLUME_PIN = A8;
 const int VOLUME_CHANGE_THRESHOLD = 10; // keep volume reading from being too noisy
 int lastVolumeRaw = -1;
 
 // Buttons
-const int NUM_BUTTONS = 9;
+const int NUM_BUTTONS = 10;
+const int NUM_NOTE_BUTTONS = 8; // Only first 8 buttons play notes
 Switch button[NUM_BUTTONS];
-int buttonPins[NUM_BUTTONS] = {21, 20, 19, 18, 17, 16, 15, 0, 1};
+int buttonPins[NUM_BUTTONS] = {21, 20, 19, 18, 17, 16, 15, 22, 0, 1};
+bool buttonStates[NUM_BUTTONS] = {false};
 
 // Distance sensor
 Adafruit_VL53L0X sensor = Adafruit_VL53L0X();
@@ -23,35 +26,51 @@ const unsigned long SENSOR_INTERVAL = 50;
 
 // Audio
 float volume = 0.3f;
-bool isPlaying = false;
 float frequencies[] = {261.63f, 293.66f, 329.63f, 349.23f, 392.00f, 440.00f, 493.88f, 523.25f}; // C major scale
+float distortionAmount = 0.0f;
 
 void AudioCallback(float **in, float **out, size_t size) {
   for (size_t i = 0; i < size; i++) {
-    float sig = 0.0f;
+    float mixedSig = 0.0f;
     
-    if (isPlaying) {
-      sig = osc.Process() * volume;
+    // mix oscillators - ONLY for the first 8 buttons
+    for (int j = 0; j < NUM_NOTE_BUTTONS; j++) {
+      if (buttonStates[j]) {
+        mixedSig += osc[j].Process();
+      }
     }
+
+    // add distortion
+    if (distortionAmount > 0.0f && mixedSig != 0.0f) {
+      distortion.SetDrive(distortionAmount);
+      mixedSig = distortion.Process(mixedSig);
+    }
+      
+    // set volume
+    mixedSig *= volume * 0.3f; // lower volume with multiple notes
     
-    out[0][i] = sig; // Left channel
-    out[1][i] = sig; // Right channel
+    out[0][i] = mixedSig; // left out
+    out[1][i] = mixedSig; // right out
   }
 }
-
 
 void setup() {
   Serial.begin(115200);
 
-  // Initialize Daisy hardware for audio
+  // init Daisy hardware
   hw = DAISY.init(DAISY_SEED, AUDIO_SR_48K);
   float sample_rate = DAISY.get_samplerate();
 
-  // Initialize oscillator
-  osc.Init(sample_rate);
-  osc.SetWaveform(Oscillator::WAVE_SIN);
-  osc.SetFreq(440.0f);
-  osc.SetAmp(1.0f);
+  // init oscillators - only for the first 8 buttons
+  for (int i = 0; i < NUM_NOTE_BUTTONS; i++) {
+    osc[i].Init(sample_rate);
+    osc[i].SetWaveform(Oscillator::WAVE_SIN);
+    osc[i].SetFreq(frequencies[i]);
+    osc[i].SetAmp(1.0f);
+  }
+
+  // init distortion
+  distortion.Init();
 
   // Start audio processing
   DAISY.begin(AudioCallback);
@@ -60,7 +79,6 @@ void setup() {
   pinMode(VOLUME_PIN, INPUT);
 
   // buttons
-  // update at 1kHz, no invert
   for (int i = 0; i < NUM_BUTTONS; i++) {
     button[i].Init(1000, true, buttonPins[i], INPUT_PULLUP);
   }
@@ -71,12 +89,10 @@ void setup() {
     Serial.println(F("Failed to boot VL53L0X"));
     while(1);
   }
-  // power
   Serial.println(F("VL53L0X API Continuous Ranging example\n\n"));
-
-  // start continuous ranging
   sensor.startRangeContinuous();
 }
+
 void loop() {
   // volume
   int volumeRaw = analogRead(VOLUME_PIN);
@@ -91,40 +107,55 @@ void loop() {
   }
 
   // buttons
-  isPlaying = false;
-
   for (int i = 0; i < NUM_BUTTONS; i++) {
-    // Debounce the buttons
     button[i].Debounce();
+    bool currentState = button[i].Pressed();
 
-    if (button[i].Pressed()) {
-      // Set frequency and start playing
-      osc.SetFreq(frequencies[i]);
-      isPlaying = true;
-
+    if (currentState && !buttonStates[i]) {
+      // button pressed
+      buttonStates[i] = true;
+      
+      if (i < NUM_NOTE_BUTTONS) {
+        // Only print note info for the first 8 buttons
+        Serial.print("Button ");
+        Serial.print(i + 1);
+        Serial.print(" ON - Note: ");
+        Serial.print(frequencies[i]);
+        Serial.println(" Hz");
+      } else {
+        // Buttons 9 and 10 - you can use these for other functions
+        Serial.print("Button ");
+        Serial.print(i + 1);
+        Serial.println(" ON - Control button");
+      }
+      
+    } else if (!currentState && buttonStates[i]) {
+      // button released
+      buttonStates[i] = false;
       Serial.print("Button ");
       Serial.print(i + 1);
-      Serial.print(" Pressed - Note: ");
-      Serial.print(frequencies[i]);
-      Serial.println(" Hz");
+      Serial.println(" OFF");
     }
   }
 
   // distance sensor
-    if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
+  if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
     if (sensor.isRangeComplete()) {
       int distance = sensor.readRange();
       
       if (abs(distance - lastDistance) > DISTANCE_CHANGE_THRESHOLD) {
+        distortionAmount = map(constrain(distance, 50, 300), 50, 300, 50, 0) / 100.0f;
+        
         Serial.print("Distance: ");
         Serial.print(distance);
-        Serial.println(" mm");
+        Serial.print(" mm - Distortion: ");
+        Serial.print(distortionAmount * 100);
+        Serial.println("%");
         lastDistance = distance;
       }
     }
     lastSensorRead = millis();
   }
 
-  // wait 1 ms
   delay(1);
 }
