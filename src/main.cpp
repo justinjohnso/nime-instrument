@@ -27,8 +27,7 @@ const unsigned long SENSOR_INTERVAL = 50;
 
 // Audio
 float volume = 0.3f;
-float frequencies[] = {261.63f, 293.66f, 329.63f, 392.00f, 440.00f}; // C major pentatonic: C, D, E, G, A
-// float frequencies[] = {261.63f, 293.66f, 329.63f, 349.23f, 392.00f, 440.00f, 493.88f, 523.25f}; // C major scale
+int midiNotes[] = {60, 62, 64, 67, 69}; // C, D, E, G, A (maj pentatonic)
 float distortionAmount = 0.0f;
 
 void AudioCallback(float **in, float **out, size_t size) {
@@ -67,7 +66,7 @@ void setup() {
   for (int i = 0; i < NUM_NOTE_BUTTONS; i++) {
     osc[i].Init(sample_rate);
     osc[i].SetWaveform(Oscillator::WAVE_SIN);
-    osc[i].SetFreq(frequencies[i]);
+    osc[i].SetFreq(mtof(midiNotes[i]));
     osc[i].SetAmp(1.0f);
   }
 
@@ -122,7 +121,7 @@ void loop() {
         Serial.print("Button ");
         Serial.print(i + 1);
         Serial.print(" ON - Note: ");
-        Serial.print(frequencies[i]);
+        Serial.print(mtof(midiNotes[i]));
         Serial.println(" Hz");
       } else {
         // Buttons 9 and 10 - you can use these for other functions
