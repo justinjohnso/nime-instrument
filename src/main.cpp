@@ -6,15 +6,16 @@ Oscillator osc[8];
 Overdrive distortion;
 
 // Volume pot
-const int VOLUME_PIN = A8;
+const int VOLUME_PIN = A0;
 const int VOLUME_CHANGE_THRESHOLD = 10; // keep volume reading from being too noisy
 int lastVolumeRaw = -1;
 
 // Buttons
-const int NUM_BUTTONS = 10;
-const int NUM_NOTE_BUTTONS = 8; // Only first 8 buttons play notes
+const int NUM_BUTTONS = 7;
+const int NUM_NOTE_BUTTONS = 5;
+const int EFFECT_TOGGLE_BUTTON = 5;
 Switch button[NUM_BUTTONS];
-int buttonPins[NUM_BUTTONS] = {21, 20, 19, 18, 17, 16, 15, 22, 0, 1};
+int buttonPins[NUM_BUTTONS] = {18, 20, 24, 26, 22, 16, 28};
 bool buttonStates[NUM_BUTTONS] = {false};
 
 // Distance sensor
@@ -26,7 +27,8 @@ const unsigned long SENSOR_INTERVAL = 50;
 
 // Audio
 float volume = 0.3f;
-float frequencies[] = {261.63f, 293.66f, 329.63f, 349.23f, 392.00f, 440.00f, 493.88f, 523.25f}; // C major scale
+float frequencies[] = {261.63f, 293.66f, 329.63f, 392.00f, 440.00f}; // C major pentatonic: C, D, E, G, A
+// float frequencies[] = {261.63f, 293.66f, 329.63f, 349.23f, 392.00f, 440.00f, 493.88f, 523.25f}; // C major scale
 float distortionAmount = 0.0f;
 
 void AudioCallback(float **in, float **out, size_t size) {
