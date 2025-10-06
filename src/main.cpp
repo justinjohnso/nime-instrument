@@ -43,11 +43,11 @@ bool rightButtonStates[NUM_RIGHT_BUTTONS] = {false};
 bool rightButtonPrevStates[NUM_RIGHT_BUTTONS] = {false};
 // Mapping
 enum RightHandButtons {
-  RIGHT_THUMB = 0,    // SHIFT key
-  RIGHT_INDEX = 1,    // Ocatave up
+  RIGHT_THUMB = 4,    // SHIFT key
+  RIGHT_INDEX = 3,    // Ocatave up
   RIGHT_MIDDLE = 2,   // Momentary flat
-  RIGHT_RING = 3,     // Used in combos
-  RIGHT_PINKY = 4     // Octave down
+  RIGHT_RING = 1,     // Used in combos
+  RIGHT_PINKY = 0     // Octave down
 };
 
 //////////////////////
@@ -174,17 +174,19 @@ void setup() {
   pinMode(VOLUME_PIN, INPUT); // volume pot
 
   // distance sensor
+  Wire.setSDA(13);  // I2C4 SDA on Daisy Seed
+  Wire.setSCL(14);  // I2C4 SCL on Daisy Seed
   Wire.begin();
   Wire.setClock(400000);
   Serial.println("Adafruit VL53L0X init...");
-if (sensor.begin()) {
-    Serial.println("VL53L0X OK - starting continuous ranging");
-    sensor.startRangeContinuous();
-    tofAvailable = true;
-  } else {
-    Serial.println("Failed to boot VL53L0X - continuing without ToF");
-    Serial.println("Tip: check power (3V3/GND), SDA/SCL wiring, and that I2C pins aren't reused by buttons.");
-    i2cScan();
+  if (sensor.begin()) {
+      Serial.println("VL53L0X OK - starting continuous ranging");
+      sensor.startRangeContinuous();
+      tofAvailable = true;
+    } else {
+      Serial.println("Failed to boot VL53L0X - continuing without ToF");
+      Serial.println("Tip: check power (3V3/GND), SDA/SCL wiring, and that I2C pins aren't reused by buttons.");
+      i2cScan();
   }
 
   // left hand buttons
@@ -368,6 +370,7 @@ void loop() {
     rightButton[i].Debounce();
     rightButtonStates[i] = rightButton[i].Pressed();
   }
+
   handleRightHand();
 
   // left hand
