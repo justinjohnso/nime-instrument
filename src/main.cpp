@@ -26,7 +26,7 @@ bool tofAvailable = false;
 //Buttons
 const int NUM_LEFT_BUTTONS = 5;
 Switch leftButton[NUM_LEFT_BUTTONS];
-int leftButtonPins[NUM_LEFT_BUTTONS] = {8, 9, 10, 11, 12};
+int leftButtonPins[NUM_LEFT_BUTTONS] = {8, 9, 10, 13, 14};
 bool leftButtonStates[NUM_LEFT_BUTTONS] = {false};
 bool leftButtonPrevStates[NUM_LEFT_BUTTONS] = {false};
 
@@ -174,10 +174,16 @@ void setup() {
   pinMode(VOLUME_PIN, INPUT); // volume pot
 
   // distance sensor
-  Wire.setSDA(13);  // I2C4 SDA on Daisy Seed
-  Wire.setSCL(14);  // I2C4 SCL on Daisy Seed
+  // Wire.setSDA(13);  // I2C4 SDA on Daisy Seed
+  // Wire.setSCL(14);  // I2C4 SCL on Daisy Seed
   Wire.begin();
   Wire.setClock(400000);
+  
+  // ALWAYS run I2C scan first to see what's connected
+  Serial.println("=== Running I2C scan ===");
+  i2cScan();
+  Serial.println("=== Scan complete ===");
+  
   Serial.println("Adafruit VL53L0X init...");
   if (sensor.begin()) {
       Serial.println("VL53L0X OK - starting continuous ranging");
@@ -185,8 +191,7 @@ void setup() {
       tofAvailable = true;
     } else {
       Serial.println("Failed to boot VL53L0X - continuing without ToF");
-      Serial.println("Tip: check power (3V3/GND), SDA/SCL wiring, and that I2C pins aren't reused by buttons.");
-      i2cScan();
+      Serial.println("Tip: Verify sensor is wired to D11(SDA) and D12(SCL) for I2C1");
   }
 
   // left hand buttons
