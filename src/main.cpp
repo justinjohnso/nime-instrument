@@ -3,8 +3,8 @@
 #include <Wire.h>
 
 DaisyHardware hw;
-Oscillator osc[8];
-Overdrive distortion;
+Oscillator oscSine[5];  // Sine oscillators for each button
+Oscillator oscTri[5];   // Triangle oscillators for each button
 
 // Volume pot
 const int VOLUME_PIN = A5;
@@ -44,9 +44,9 @@ bool rightButtonPrevStates[NUM_RIGHT_BUTTONS] = {false};
 // Mapping
 enum RightHandButtons {
   RIGHT_THUMB = 4,    // SHIFT key
-  RIGHT_INDEX = 3,    // Ocatave up
-  RIGHT_MIDDLE = 2,   // Momentary flat
-  RIGHT_RING = 1,     // Used in combos
+  RIGHT_INDEX = 3,    // Octave up
+  RIGHT_MIDDLE = 2,   // Momentary sharp
+  RIGHT_RING = 1,     // Momentary flat
   RIGHT_PINKY = 0     // Octave down
 };
 
@@ -55,11 +55,14 @@ enum RightHandButtons {
 /////////////////////
 // Audio
 float volume = 0.3f;
-float distortionAmount = 0.0f;
+float waveformBlend = 0.0f; // 0.0 = sine, 1.0 = triangle
+float sineAmp = 1.0f;      // Amplitude for sine wave
+float triAmp = 0.0f;       // Amplitude for triangle wave
 
 // Scale definitions
 int currentOctave = 4; // Start in the middle of the octave range
 int currentKey = 0; // C major
+int pitchOffset = 0; // Momentary sharp/flat offset in semitones
 enum ScaleType {
   SCALE_MAJOR_PENTATONIC = 0,
   SCALE_BLUES = 1,
@@ -108,6 +111,13 @@ enum PlayMode {
 int currentMode = MODE_SINGLE_NOTE;
 bool latchMode = false;
 
+void clearAllLatchedNotes() {
+  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+    leftButtonStates[i] = false;
+  }
+  Serial.println("All latched notes cleared");
+}
+
 void updateScaleNotes() { // midi values
   int baseNote = (currentOctave * 12) + currentKey;
 
@@ -130,21 +140,30 @@ void updateScaleNotes() { // midi values
   }
 };
 
+// Apply pitch offset to all currently playing notes
+void applyPitchOffset() {
+  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+    if (leftButtonStates[i]) {
+      // Note is playing, shift its frequency
+      int shiftedNote = currentScaleNotes[i] + pitchOffset;
+      float freq = mtof(shiftedNote);
+      oscSine[i].SetFreq(freq);
+      oscTri[i].SetFreq(freq);
+    }
+  }
+}
+
 void AudioCallback(float **in, float **out, size_t size) {
   for (size_t i = 0; i < size; i++) {
     float mixedSig = 0.0f;
     
-    // mix oscillators
+    // mix oscillators with crossfade
     for (int j = 0; j < NUM_LEFT_BUTTONS; j++) {
       if (leftButtonStates[j]) {
-        mixedSig += osc[j].Process();
+        float sineSig = oscSine[j].Process() * sineAmp;
+        float triSig = oscTri[j].Process() * triAmp;
+        mixedSig += sineSig + triSig;
       }
-    }
-
-    // add distortion
-    if (distortionAmount > 0.0f && mixedSig != 0.0f) {
-      distortion.SetDrive(distortionAmount);
-      mixedSig = distortion.Process(mixedSig);
     }
       
     // set volume
@@ -162,14 +181,17 @@ void setup() {
   hw = DAISY.init(DAISY_SEED, AUDIO_SR_48K);
   float sample_rate = DAISY.get_samplerate();
 
-  // init oscillator
+  // init oscillators (sine and triangle pairs)
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
-    osc[i].Init(sample_rate);
-    osc[i].SetWaveform(Oscillator::WAVE_SIN);
-    osc[i].SetAmp(1.0f);
+    oscSine[i].Init(sample_rate);
+    oscSine[i].SetWaveform(Oscillator::WAVE_SIN);
+    oscSine[i].SetAmp(1.0f);
+    
+    oscTri[i].Init(sample_rate);
+    oscTri[i].SetWaveform(Oscillator::WAVE_TRI);
+    oscTri[i].SetAmp(0.0f);  // Start with triangle silent
   }
 
-  distortion.Init();  // init distortion
   DAISY.begin(AudioCallback); // start audio processing
   pinMode(VOLUME_PIN, INPUT); // volume pot
 
@@ -219,6 +241,31 @@ void handleRightHand() {
   bool ringPressed = rightButtonStates[RIGHT_RING];
   bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
 
+  // Handle momentary sharp/flat (when thumb NOT pressed)
+  if (!thumbPressed) {
+    // Momentary sharp (middle finger)
+    if (middlePressed && !rightButtonPrevStates[RIGHT_MIDDLE]) {
+      pitchOffset = 1;
+      applyPitchOffset();
+      Serial.println("Momentary Sharp (#): +1 semitone to playing notes");
+    } else if (!middlePressed && rightButtonPrevStates[RIGHT_MIDDLE]) {
+      pitchOffset = 0;
+      applyPitchOffset();
+      Serial.println("Sharp Released: back to normal pitch");
+    }
+    
+    // Momentary flat (ring finger)
+    if (ringPressed && !rightButtonPrevStates[RIGHT_RING]) {
+      pitchOffset = -1;
+      applyPitchOffset();
+      Serial.println("Momentary Flat (♭): -1 semitone to playing notes");
+    } else if (!ringPressed && rightButtonPrevStates[RIGHT_RING]) {
+      pitchOffset = 0;
+      applyPitchOffset();
+      Serial.println("Flat Released: back to normal pitch");
+    }
+  }
+
   // thumb ("shift" button)
   if (thumbPressed) {
     // change scale
@@ -242,6 +289,10 @@ void handleRightHand() {
       latchMode = !latchMode;
       Serial.print("Latch Mode: ");
       Serial.println(latchMode ? "ON" : "OFF");
+      // When turning OFF latch mode, clear all latched notes
+      if (!latchMode) {
+        clearAllLatchedNotes();
+      }
     }
     // change chord
     else if (indexPressed && middlePressed) {
@@ -313,36 +364,49 @@ void handleLeftHand() {
         Serial.println(currentKey);
       }
     } else if (latchMode) {
-      // Toggle note on each press; ignore release
+      // Latch mode: press latches note ON, press again re-triggers
       if (rising) {
-        leftButtonStates[i] = !leftButtonStates[i];
-        if (leftButtonStates[i]) {
+        if (!leftButtonStates[i]) {
+          // Note was off, latch it on
+          leftButtonStates[i] = true;
           int note = currentScaleNotes[i];
-          osc[i].SetFreq(mtof(note));
-          Serial.print("Note ON - Button ");
+          float freq = mtof(note);
+          oscSine[i].SetFreq(freq);
+          oscTri[i].SetFreq(freq);
+          Serial.print("Note LATCHED - Button ");
           Serial.print(i + 1);
           Serial.print(", MIDI Note: ");
           Serial.print(note);
           Serial.print(" (");
-          Serial.print(mtof(note));
+          Serial.print(freq);
           Serial.println(" Hz)");
         } else {
-          Serial.print("Note OFF - Button ");
+          // Note already latched, re-trigger it
+          int note = currentScaleNotes[i];
+          float freq = mtof(note);
+          oscSine[i].SetFreq(freq);
+          oscTri[i].SetFreq(freq);
+          oscSine[i].Reset();
+          oscTri[i].Reset();
+          Serial.print("Note RE-TRIGGERED - Button ");
           Serial.println(i + 1);
         }
       }
+      // Ignore release in latch mode
     } else {
       // Normal: press = ON, release = OFF
       if (rising) {
         leftButtonStates[i] = true;
         int note = currentScaleNotes[i];
-        osc[i].SetFreq(mtof(note));
+        float freq = mtof(note);
+        oscSine[i].SetFreq(freq);
+        oscTri[i].SetFreq(freq);
         Serial.print("Note ON - Button ");
         Serial.print(i + 1);
         Serial.print(", MIDI Note: ");
         Serial.print(note);
         Serial.print(" (");
-        Serial.print(mtof(note));
+        Serial.print(freq);
         Serial.println(" Hz)");
       }
       if (falling) {
@@ -388,15 +452,31 @@ void loop() {
       
       if (abs(distance - lastDistance) > DISTANCE_CHANGE_THRESHOLD) {
         switch (currentMode) {
-          case MODE_SINGLE_NOTE:
-            // distortion
-            distortionAmount = map(constrain(distance, 50, 300), 50, 300, 50, 0) / 100.0f;
+          case MODE_SINGLE_NOTE: {
+            // waveform crossfading: triangle when close, sine when far
+            waveformBlend = map(constrain(distance, 50, 300), 50, 300, 100, 0) / 100.0f;
+            
+            // Equal-power crossfade to maintain constant perceived volume
+            // Uses square root curves so that sine²(x) + cosine²(x) = 1
+            float blendRadians = waveformBlend * (PI / 2.0f);  // 0 to π/2
+            triAmp = sinf(blendRadians);      // 0.0 to 1.0 (curved)
+            sineAmp = cosf(blendRadians);     // 1.0 to 0.0 (curved)
+            
+            // Update amplitudes for all oscillator pairs
+            for (int j = 0; j < NUM_LEFT_BUTTONS; j++) {
+              oscSine[j].SetAmp(sineAmp);
+              oscTri[j].SetAmp(triAmp);
+            }
+            
             Serial.print("Distance: ");
             Serial.print(distance);
-            Serial.print(" mm - Distortion: ");
-            Serial.print(distortionAmount * 100);
+            Serial.print(" mm - Blend: Sine ");
+            Serial.print(sineAmp * 100, 0);
+            Serial.print("% / Tri ");
+            Serial.print(triAmp * 100, 0);
             Serial.println("%");
             break;
+          }
           case MODE_MAJOR_CHORD:
             // arpeggiator or strum 
             Serial.print("Distance: ");
