@@ -25,6 +25,18 @@ DaisyHardware hw;
 Oscillator oscSine[5];  // Sine oscillators for each button
 Oscillator oscTri[5];   // Triangle oscillators for each button
 
+// Envelope System
+const float ATTACK_TIME = 0.02f;   // 20ms attack to eliminate clicks
+const float RELEASE_TIME = 0.15f;  // 150ms release for smooth fade
+struct NoteEnvelope {
+  float level;              // Current envelope amplitude (0.0 to 1.0)
+  bool isActive;            // Note is playing
+  bool isReleasing;         // In release phase
+  unsigned long attackStartTime;
+  unsigned long releaseStartTime;
+};
+NoteEnvelope envelopes[5];
+
 // Volume Control
 const int VOLUME_PIN = A5;
 const int VOLUME_CHANGE_THRESHOLD = 10;  // ADC counts hysteresis to reduce jitter
@@ -80,6 +92,7 @@ float volume = 0.3f;                // Global volume (0.0 to 1.0)
 float waveformBlend = 0.0f;         // Blend position (0.0 = sine, 1.0 = triangle)
 float sineAmp = 1.0f;               // Sine wave amplitude (equal-power crossfade)
 float triAmp = 0.0f;                // Triangle wave amplitude (equal-power crossfade)
+float triBoost = 1.0f;              // Boost triangle amplitude for more dramatic morph
 
 // Scale & Key Settings
 const int OCTAVE_MIN = 1;
@@ -175,6 +188,71 @@ void updateScaleNotes() {
 };
 
 /**
+ * Soft clipping function to prevent harsh distortion
+ * Uses tanh for smooth saturation
+ */
+float softClip(float sample) {
+  return tanhf(sample * 1.5f) / 1.5f;  // Gentle saturation
+}
+
+/**
+ * Process envelope for a note (Attack/Release)
+ * Returns current envelope level (0.0 to 1.0)
+ */
+float processEnvelope(int noteIndex) {
+  NoteEnvelope &env = envelopes[noteIndex];
+  
+  if (!env.isActive) {
+    return 0.0f;
+  }
+  
+  unsigned long currentTime = millis();
+  
+  if (env.isReleasing) {
+    // Release phase
+    float elapsed = (currentTime - env.releaseStartTime) / 1000.0f;
+    if (elapsed >= RELEASE_TIME) {
+      env.isActive = false;
+      env.level = 0.0f;
+      return 0.0f;
+    }
+    env.level = 1.0f - (elapsed / RELEASE_TIME);
+  } else {
+    // Attack phase
+    float elapsed = (currentTime - env.attackStartTime) / 1000.0f;
+    if (elapsed >= ATTACK_TIME) {
+      env.level = 1.0f;
+    } else {
+      env.level = elapsed / ATTACK_TIME;
+    }
+  }
+  
+  return env.level;
+}
+
+/**
+ * Trigger envelope attack for a note
+ */
+void triggerNote(int noteIndex) {
+  NoteEnvelope &env = envelopes[noteIndex];
+  env.isActive = true;
+  env.isReleasing = false;
+  env.attackStartTime = millis();
+  env.level = 0.0f;
+}
+
+/**
+ * Release a note (start release phase)
+ */
+void releaseNote(int noteIndex) {
+  NoteEnvelope &env = envelopes[noteIndex];
+  if (env.isActive && !env.isReleasing) {
+    env.isReleasing = true;
+    env.releaseStartTime = millis();
+  }
+}
+
+/**
  * Apply pitch offset (sharp/flat) to all currently playing notes
  * Used for momentary pitch bend via right hand buttons
  */
@@ -193,18 +271,31 @@ void applyPitchOffset() {
 void AudioCallback(float **in, float **out, size_t size) {
   for (size_t i = 0; i < size; i++) {
     float mixedSig = 0.0f;
+    int activeNotes = 0;
     
-    // mix oscillators with crossfade
+    // Mix oscillators with envelope and crossfade
     for (int j = 0; j < NUM_LEFT_BUTTONS; j++) {
-      if (leftButtonStates[j]) {
+      float envLevel = processEnvelope(j);
+      
+      if (envLevel > 0.001f) {  // Only process if envelope is active
+        activeNotes++;
         float sineSig = oscSine[j].Process() * sineAmp;
-        float triSig = oscTri[j].Process() * triAmp;
-        mixedSig += sineSig + triSig;
+        float triSig = oscTri[j].Process() * triAmp * triBoost;
+        mixedSig += (sineSig + triSig) * envLevel;
       }
     }
-      
-    // set volume
-    mixedSig *= volume * 0.3f; // lower volume with multiple notes
+    
+    // Dynamic polyphony scaling (reduce volume as more notes play)
+    if (activeNotes > 0) {
+      float polyScale = 1.0f / sqrtf((float)activeNotes);
+      mixedSig *= polyScale;
+    }
+    
+    // Apply volume
+    mixedSig *= volume * 0.4f;
+    
+    // Soft clipping to prevent harsh distortion
+    mixedSig = softClip(mixedSig);
     
     out[0][i] = mixedSig; // left out
     out[1][i] = mixedSig; // right out
@@ -226,7 +317,12 @@ void setup() {
     
     oscTri[i].Init(sample_rate);
     oscTri[i].SetWaveform(Oscillator::WAVE_TRI);
-    oscTri[i].SetAmp(0.0f);  // Start with triangle silent
+    oscTri[i].SetAmp(1.0f);  // Now controlled by blend factor
+    
+    // Initialize envelopes
+    envelopes[i].level = 0.0f;
+    envelopes[i].isActive = false;
+    envelopes[i].isReleasing = false;
   }
 
   DAISY.begin(AudioCallback); // start audio processing
@@ -410,6 +506,7 @@ void handleLeftHand() {
           float freq = mtof(note);
           oscSine[i].SetFreq(freq);
           oscTri[i].SetFreq(freq);
+          triggerNote(i);  // Start envelope attack
           Serial.print("Note LATCHED - Button ");
           Serial.print(i + 1);
           Serial.print(", MIDI Note: ");
@@ -418,13 +515,14 @@ void handleLeftHand() {
           Serial.print(freq);
           Serial.println(" Hz)");
         } else {
-          // Note already latched, re-trigger it
+          // Note already latched, re-trigger envelope
           int note = currentScaleNotes[i];
           float freq = mtof(note);
           oscSine[i].SetFreq(freq);
           oscTri[i].SetFreq(freq);
           oscSine[i].Reset();
           oscTri[i].Reset();
+          triggerNote(i);  // Retrigger envelope from start
           Serial.print("Note RE-TRIGGERED - Button ");
           Serial.println(i + 1);
         }
@@ -438,6 +536,7 @@ void handleLeftHand() {
         float freq = mtof(note);
         oscSine[i].SetFreq(freq);
         oscTri[i].SetFreq(freq);
+        triggerNote(i);  // Start envelope attack
         Serial.print("Note ON - Button ");
         Serial.print(i + 1);
         Serial.print(", MIDI Note: ");
@@ -448,6 +547,7 @@ void handleLeftHand() {
       }
       if (falling) {
         leftButtonStates[i] = false;
+        releaseNote(i);  // Start envelope release
         Serial.print("Note OFF - Button ");
         Serial.println(i + 1);
       }
@@ -500,11 +600,9 @@ void loop() {
             triAmp = sinf(blendRadians);      // 0.0 to 1.0 (curved)
             sineAmp = cosf(blendRadians);     // 1.0 to 0.0 (curved)
             
-            // Update amplitudes for all oscillator pairs
-            for (int j = 0; j < NUM_LEFT_BUTTONS; j++) {
-              oscSine[j].SetAmp(sineAmp);
-              oscTri[j].SetAmp(triAmp);
-            }
+            // Boost triangle for more dramatic timbral difference
+            // Close = more aggressive triangle character
+            triBoost = 1.0f + (waveformBlend * 0.8f);  // 1.0x to 1.8x boost
             
             Serial.print("Distance: ");
             Serial.print(distance);
@@ -512,7 +610,9 @@ void loop() {
             Serial.print(sineAmp * 100, 0);
             Serial.print("% / Tri ");
             Serial.print(triAmp * 100, 0);
-            Serial.println("%");
+            Serial.print("% (boost: ");
+            Serial.print(triBoost, 2);
+            Serial.println("x)");
             break;
           }
           case MODE_MAJOR_CHORD:
