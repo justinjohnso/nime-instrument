@@ -19,6 +19,7 @@
 
 #include "DaisyDuino.h"
 #include <Adafruit_VL53L0X.h>
+#include <Adafruit_MSA301.h>
 #include <Wire.h>
 
 DaisyHardware hw;
@@ -49,6 +50,10 @@ int lastVolumeRaw = -1;
 
 // Distance Sensor (VL53L0X Time-of-Flight)
 Adafruit_VL53L0X sensor = Adafruit_VL53L0X();
+
+// Accelerometer (MSA311 3-axis)
+Adafruit_MSA301 accel = Adafruit_MSA301();
+bool accelAvailable = false;
 const int DISTANCE_CHANGE_THRESHOLD = 5;      // Minimum change in mm to process
 const int DISTANCE_MIN = 50;                  // Minimum distance for mapping (mm)
 const int DISTANCE_MAX = 300;                 // Maximum distance for mapping (mm)
@@ -56,6 +61,23 @@ const unsigned long SENSOR_INTERVAL = 50;     // Poll interval in ms
 int lastDistance = -1;
 unsigned long lastSensorRead = 0;
 bool tofAvailable = false;
+
+// Sliding Window (Accelerometer-based note selection)
+const int WINDOW_SIZE = 5;                    // Number of notes in window
+int windowOffset = 0;                         // Current offset in semitones within scale
+const int MAX_WINDOW_OFFSET = 24;             // ±2 octaves
+float accelCenterX = 0.0f;                    // Calibrated center X acceleration
+float accelPositionOffset = 0.0f;             // Integrated position from center
+float lastAccelX = 0.0f;                      // Previous X acceleration
+unsigned long lastAccelRead = 0;
+const unsigned long ACCEL_INTERVAL = 20;      // 50Hz polling
+const float COARSE_SENSITIVITY = 8.0f;        // Semitones per second of movement (index)
+const float FINE_SENSITIVITY = 2.0f;          // Semitones per second of movement (pinky)
+
+// Calibration
+unsigned long calibrationStartTime = 0;
+const unsigned long CALIBRATION_HOLD_TIME = 2000;  // 2 seconds to calibrate
+bool isCalibrating = false;
 
 // Left Hand Buttons (Note Articulation)
 const int NUM_LEFT_BUTTONS = 5;
@@ -163,11 +185,12 @@ void clearAllLatchedNotes() {
 }
 
 /**
- * Update the current scale notes based on octave, key, and scale type
+ * Update the current scale notes based on octave, key, scale type, and window offset
  * Calculates MIDI note numbers for each of the 5 buttons
+ * Window offset allows sliding through the scale
  */
 void updateScaleNotes() {
-  int baseNote = (currentOctave * 12) + currentKey;
+  int baseNote = (currentOctave * 12) + currentKey + windowOffset;
 
   switch (currentScale) {
     case SCALE_MAJOR_PENTATONIC:
@@ -187,6 +210,20 @@ void updateScaleNotes() {
       break;
   }
 };
+
+/**
+ * Print current sliding window information
+ */
+void printWindow() {
+  Serial.print("Window: ");
+  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+    Serial.print(currentScaleNotes[i]);
+    if (i < NUM_LEFT_BUTTONS - 1) Serial.print(", ");
+  }
+  Serial.print(" (offset: ");
+  Serial.print(windowOffset);
+  Serial.println(" semitones)");
+}
 
 /**
  * Soft clipping function to prevent harsh distortion
@@ -349,6 +386,20 @@ void setup() {
       Serial.println("Failed to boot VL53L0X - continuing without ToF");
       Serial.println("Tip: Verify sensor is wired to D11(SDA) and D12(SCL) for I2C1");
   }
+  
+  Serial.println("MSA301 Accelerometer init...");
+  if (accel.begin()) {
+    Serial.println("MSA301 OK - ready for motion control");
+    accelAvailable = true;
+    // Initial calibration
+    accel.read();
+    accelCenterX = accel.x;
+    Serial.print("Initial center calibration: X=");
+    Serial.println(accelCenterX);
+  } else {
+    Serial.println("Failed to initialize MSA301 - continuing without accelerometer");
+    Serial.println("Tip: Verify sensor is wired to I2C bus");
+  }
 
   // left hand buttons
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
@@ -447,21 +498,36 @@ void handleRightHand() {
       Serial.println("Key Set Mode – Use left hand to select key");
     }
   }
-  // single button actions
+  // single button actions (now control sliding window mode)
   else {
-    // octave up
-    if (indexPressed && !rightButtonPrevStates[RIGHT_INDEX]) {
-      currentOctave = constrain(currentOctave + 1, OCTAVE_MIN, OCTAVE_MAX);
-      updateScaleNotes();
-      Serial.print("Octave: ");
-      Serial.println(currentOctave);
-    }
-    // octave down
-    if (pinkyPressed && !rightButtonPrevStates[RIGHT_PINKY]) {
-      currentOctave = constrain(currentOctave - 1, OCTAVE_MIN, OCTAVE_MAX);
-      updateScaleNotes();
-      Serial.print("Octave: ");
-      Serial.println(currentOctave);
+    // Check for calibration gesture (both index + pinky held together)
+    if (indexPressed && pinkyPressed) {
+      if (!isCalibrating && calibrationStartTime == 0) {
+        calibrationStartTime = millis();
+        Serial.println("Hold for 2s to calibrate center position...");
+      } else if (millis() - calibrationStartTime >= CALIBRATION_HOLD_TIME) {
+        // Calibrate!
+        if (accelAvailable) {
+          accel.read();
+          accelCenterX = accel.x;
+          accelPositionOffset = 0.0f;
+          windowOffset = 0;
+          updateScaleNotes();
+          Serial.println("=== CALIBRATED ===");
+          Serial.print("New center X: ");
+          Serial.println(accelCenterX);
+          printWindow();
+        }
+        isCalibrating = false;
+        calibrationStartTime = 0;
+      }
+    } else {
+      // Reset calibration timer if buttons released
+      if (calibrationStartTime != 0 && !isCalibrating) {
+        Serial.println("Calibration cancelled");
+      }
+      calibrationStartTime = 0;
+      isCalibrating = false;
     }
     // reset to single note (no combos pressed)
     if (!indexPressed && !middlePressed && !ringPressed && currentMode != MODE_SINGLE_NOTE) {
@@ -582,6 +648,45 @@ void loop() {
 
   // left hand
   handleLeftHand();
+
+  // accelerometer (sliding window control)
+  if (accelAvailable && (millis() - lastAccelRead >= ACCEL_INTERVAL)) {
+    accel.read();
+    float accelX = accel.x;
+    float deltaT = (millis() - lastAccelRead) / 1000.0f;  // Time in seconds
+    
+    // Only process if index or pinky pressed (not both - that's calibration)
+    bool indexPressed = rightButtonStates[RIGHT_INDEX];
+    bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
+    
+    if ((indexPressed || pinkyPressed) && !(indexPressed && pinkyPressed)) {
+      // Calculate velocity (change from center)
+      float velocity = accelX - accelCenterX;
+      
+      // Choose sensitivity based on which button is pressed
+      float sensitivity = indexPressed ? COARSE_SENSITIVITY : FINE_SENSITIVITY;
+      
+      // Integrate velocity to position
+      accelPositionOffset += velocity * sensitivity * deltaT;
+      
+      // Update window offset (convert to integer semitones)
+      int newWindowOffset = (int)round(accelPositionOffset);
+      newWindowOffset = constrain(newWindowOffset, -MAX_WINDOW_OFFSET, MAX_WINDOW_OFFSET);
+      
+      // Only update if changed
+      if (newWindowOffset != windowOffset) {
+        windowOffset = newWindowOffset;
+        updateScaleNotes();
+        
+        // Print window info
+        Serial.print(indexPressed ? "[COARSE] " : "[FINE] ");
+        printWindow();
+      }
+    }
+    
+    lastAccelX = accelX;
+    lastAccelRead = millis();
+  }
 
   // distance sensor
   if (tofAvailable && (millis() - lastSensorRead >= SENSOR_INTERVAL)) {
