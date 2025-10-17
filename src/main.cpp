@@ -157,6 +157,7 @@ bool latchMode = false;             // When true, buttons latch notes ON
 void clearAllLatchedNotes() {
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
     leftButtonStates[i] = false;
+    releaseNote(i);  // Trigger envelope release for smooth fade-out
   }
   Serial.println("All latched notes cleared");
 }
