@@ -184,16 +184,17 @@
 ┌─────────────────────────────────────────────────────────┐
 │  LEFT HAND CONTROLLER                                   │
 ├─────────────────────────────────────────────────────────┤
-│  • Buttons:          D8, D9, D10, D13, D14             │
+│  • Buttons:          D8, D9, D10, D13, D14 (5 total)  │
 │  • Distance Sensor:  I2C1 (SDA=D11, SCL=D12)           │
+│  • Note: Button pins skip D11 & D12 (reserved I2C)     │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
 │  RIGHT HAND CONTROLLER                                  │
 ├─────────────────────────────────────────────────────────┤
 │  D15 → PINKY    (Octave Down)                          │
-│  D16 → RING     (Combos)                               │
-│  D17 → MIDDLE   (Flat/Combos)                          │
+│  D16 → RING     (Flats / Combos)                       │
+│  D17 → MIDDLE   (Sharps / Combos)                      │
 │  D18 → INDEX    (Octave Up)                            │
 │  D19 → THUMB    (SHIFT Key)                            │
 └─────────────────────────────────────────────────────────┘

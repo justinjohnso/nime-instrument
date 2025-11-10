@@ -176,6 +176,9 @@ enum PlayMode {
 int currentMode = MODE_SINGLE_NOTE;
 bool latchMode = false;             // When true, buttons latch notes ON
 
+// Forward declaration
+void releaseNote(int noteIndex);
+
 void clearAllLatchedNotes() {
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
     leftButtonStates[i] = false;
@@ -366,40 +369,34 @@ void setup() {
   DAISY.begin(AudioCallback); // start audio processing
   pinMode(VOLUME_PIN, INPUT); // volume pot
 
-  // distance sensor
-  // Wire.setSDA(13);  // I2C4 SDA on Daisy Seed
-  // Wire.setSCL(14);  // I2C4 SCL on Daisy Seed
+  // I2C sensor initialization
   Wire.begin();
   Wire.setClock(400000);
+  
+  delay(100);  // Give I2C bus time to stabilize
   
   // ALWAYS run I2C scan first to see what's connected
   Serial.println("=== Running I2C scan ===");
   i2cScan();
   Serial.println("=== Scan complete ===");
   
-  Serial.println("Adafruit VL53L0X init...");
+  delay(100);
+  
+  // Initialize VL53L0X (address 0x29)
+  Serial.println("Initializing VL53L0X ToF sensor...");
   if (sensor.begin()) {
-      Serial.println("VL53L0X OK - starting continuous ranging");
-      sensor.startRangeContinuous();
-      tofAvailable = true;
-    } else {
-      Serial.println("Failed to boot VL53L0X - continuing without ToF");
-      Serial.println("Tip: Verify sensor is wired to D11(SDA) and D12(SCL) for I2C1");
+    Serial.println("VL53L0X OK - starting continuous ranging");
+    sensor.startRangeContinuous();
+    tofAvailable = true;
+  } else {
+    Serial.println("VL53L0X initialization failed - continuing without ToF");
   }
   
-  Serial.println("MSA301 Accelerometer init...");
-  if (accel.begin()) {
-    Serial.println("MSA301 OK - ready for motion control");
-    accelAvailable = true;
-    // Initial calibration
-    accel.read();
-    accelCenterX = accel.x;
-    Serial.print("Initial center calibration: X=");
-    Serial.println(accelCenterX);
-  } else {
-    Serial.println("Failed to initialize MSA301 - continuing without accelerometer");
-    Serial.println("Tip: Verify sensor is wired to I2C bus");
-  }
+  delay(100);
+  
+  // DON'T initialize MSA301 for now - it's causing I2C bus issues
+  Serial.println("MSA301 accelerometer disabled - feature not available");
+  accelAvailable = false;
 
   // left hand buttons
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
