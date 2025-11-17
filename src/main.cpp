@@ -73,18 +73,17 @@ int lastDistance = -1;
 unsigned long lastSensorRead = 0;
 bool tofAvailable = false;
 
-// Sliding Window (Accelerometer-based note selection) - LEGACY, disabled
-// Note: This experimental feature is replaced by IMU pitch bend/modulation
-// These variables kept for reference/potential future use
-int windowOffset = 0;                         // Reserved for future sliding window feature
-// const int WINDOW_SIZE = 5;                    // Number of notes in window
-// const int MAX_WINDOW_OFFSET = 24;             // ±2 octaves
-// float accelPositionOffset = 0.0f;             // Integrated position from center
-// float lastAccelX = 0.0f;                      // Previous X acceleration
-// unsigned long lastAccelRead = 0;
-// const unsigned long ACCEL_INTERVAL = 20;      // 50Hz polling
-// const float COARSE_SENSITIVITY = 8.0f;        // Semitones per second of movement (index)
-// const float FINE_SENSITIVITY = 2.0f;          // Semitones per second of movement (pinky)
+// Sliding Window (Accelerometer-based note selection via tilt)
+// Allows navigating up/down through available scale notes by tilting left/right
+const int WINDOW_SIZE = 5;                    // Number of notes in window
+int windowOffset = 0;                         // Current offset in semitones within scale
+const int MAX_WINDOW_OFFSET = 24;             // ±2 octaves
+float accelPositionOffset = 0.0f;             // Integrated position from center
+float lastAccelX = 0.0f;                      // Previous X acceleration
+unsigned long lastAccelRead = 0;
+const unsigned long ACCEL_INTERVAL = 20;      // 50Hz polling
+const float COARSE_SENSITIVITY = 8.0f;        // Semitones per second of movement (index)
+const float FINE_SENSITIVITY = 2.0f;          // Semitones per second of movement (pinky)
 
 // Calibration
 unsigned long calibrationStartTime = 0;
@@ -900,25 +899,23 @@ void loop() {
   // Distance sensor processing (mode-aware palm effects)
   processDistanceSensor();
 
-  // accelerometer (sliding window control) - LEGACY, disabled for now
-  // Note: This was experimental accelerometer-based sliding window feature
-  // Now replaced by IMU pitch bend/modulation
-  /*
+  // Pitch window control (accelerometer-based sliding through scale)
+  // Hold Pinky button alone + tilt left/right to navigate through available notes
   if (accelAvailable && (millis() - lastAccelRead >= ACCEL_INTERVAL)) {
     accel.read();
     float accelX = accel.x;
     float deltaT = (millis() - lastAccelRead) / 1000.0f;  // Time in seconds
     
-    // Only process if index or pinky pressed (not both - that's calibration)
     bool indexPressed = rightButtonStates[RIGHT_INDEX];
     bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
     
-    if ((indexPressed || pinkyPressed) && !(indexPressed && pinkyPressed)) {
+    // Only activate pitch window if PINKY alone is pressed (not both for calibration)
+    if (pinkyPressed && !indexPressed) {
       // Calculate velocity (change from center)
       float velocity = accelX - accelCenterX;
       
-      // Choose sensitivity based on which button is pressed
-      float sensitivity = indexPressed ? COARSE_SENSITIVITY : FINE_SENSITIVITY;
+      // Use fine sensitivity for pinky-controlled pitch window
+      float sensitivity = FINE_SENSITIVITY;
       
       // Integrate velocity to position
       accelPositionOffset += velocity * sensitivity * deltaT;
@@ -933,7 +930,7 @@ void loop() {
         updateScaleNotes();
         
         // Print window info
-        Serial.print(indexPressed ? "[COARSE] " : "[FINE] ");
+        Serial.print("[PITCH WINDOW] ");
         printWindow();
       }
     }
@@ -941,7 +938,6 @@ void loop() {
     lastAccelX = accelX;
     lastAccelRead = millis();
   }
-  */
 
   delay(1);
 }
