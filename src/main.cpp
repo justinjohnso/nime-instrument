@@ -51,9 +51,20 @@ int lastVolumeRaw = -1;
 // Distance Sensor (VL53L0X Time-of-Flight)
 Adafruit_VL53L0X sensor = Adafruit_VL53L0X();
 
-// Accelerometer (MSA311 3-axis)
+// Accelerometer (MSA301 3-axis)
 Adafruit_MSA301 accel = Adafruit_MSA301();
 bool accelAvailable = false;
+
+// IMU calibration and pitch bend parameters
+float accelCenterX = 0.0f;              // Calibrated center X acceleration (tilt axis)
+float accelCenterZ = 0.0f;              // Calibrated center Z acceleration (roll axis)
+const float PITCH_BEND_RANGE = 2.0f;    // ±2 semitones from IMU tilt
+const float PITCH_BEND_SENSITIVITY = 0.3f;  // Acceleration to semitones conversion
+const float MODULATION_SENSITIVITY = 0.15f; // Acceleration to modulation depth
+unsigned long lastIMURead = 0;
+const unsigned long IMU_POLL_INTERVAL = 20; // 50Hz polling
+
+// Distance sensor parameters
 const int DISTANCE_CHANGE_THRESHOLD = 5;      // Minimum change in mm to process
 const int DISTANCE_MIN = 50;                  // Minimum distance for mapping (mm)
 const int DISTANCE_MAX = 300;                 // Maximum distance for mapping (mm)
@@ -62,17 +73,18 @@ int lastDistance = -1;
 unsigned long lastSensorRead = 0;
 bool tofAvailable = false;
 
-// Sliding Window (Accelerometer-based note selection)
-const int WINDOW_SIZE = 5;                    // Number of notes in window
-int windowOffset = 0;                         // Current offset in semitones within scale
-const int MAX_WINDOW_OFFSET = 24;             // ±2 octaves
-float accelCenterX = 0.0f;                    // Calibrated center X acceleration
-float accelPositionOffset = 0.0f;             // Integrated position from center
-float lastAccelX = 0.0f;                      // Previous X acceleration
-unsigned long lastAccelRead = 0;
-const unsigned long ACCEL_INTERVAL = 20;      // 50Hz polling
-const float COARSE_SENSITIVITY = 8.0f;        // Semitones per second of movement (index)
-const float FINE_SENSITIVITY = 2.0f;          // Semitones per second of movement (pinky)
+// Sliding Window (Accelerometer-based note selection) - LEGACY, disabled
+// Note: This experimental feature is replaced by IMU pitch bend/modulation
+// These variables kept for reference/potential future use
+int windowOffset = 0;                         // Reserved for future sliding window feature
+// const int WINDOW_SIZE = 5;                    // Number of notes in window
+// const int MAX_WINDOW_OFFSET = 24;             // ±2 octaves
+// float accelPositionOffset = 0.0f;             // Integrated position from center
+// float lastAccelX = 0.0f;                      // Previous X acceleration
+// unsigned long lastAccelRead = 0;
+// const unsigned long ACCEL_INTERVAL = 20;      // 50Hz polling
+// const float COARSE_SENSITIVITY = 8.0f;        // Semitones per second of movement (index)
+// const float FINE_SENSITIVITY = 2.0f;          // Semitones per second of movement (pinky)
 
 // Calibration
 unsigned long calibrationStartTime = 0;
@@ -170,11 +182,25 @@ void i2cScan() {
 // Play Modes
 enum PlayMode {
   MODE_SINGLE_NOTE = 0,     // Individual note per button
-  MODE_MAJOR_CHORD = 1,     // Reserved for future chord implementation
-  MODE_MINOR_CHORD = 2      // Reserved for future chord implementation
+  MODE_MAJOR_CHORD = 1,     // Root + Major 3rd + Perfect 5th
+  MODE_MINOR_CHORD = 2      // Root + Minor 3rd + Perfect 5th
 };
 int currentMode = MODE_SINGLE_NOTE;
 bool latchMode = false;             // When true, buttons latch notes ON
+
+// Chord voicing intervals (semitones from root)
+const int majorChordIntervals[3] = {0, 4, 7};     // Root, Major 3rd, Perfect 5th
+const int minorChordIntervals[3] = {0, 3, 7};     // Root, Minor 3rd, Perfect 5th
+const int CHORD_NOTES_PER_VOICE = 3;              // Notes per chord (root, 3rd, 5th)
+
+// Chord state tracking (which chord voices are currently active)
+struct ChordVoice {
+  int midiNote;           // MIDI note number being played
+  int oscillatorIndex;    // Which oscillator pair is handling this note (0-4)
+  bool isActive;          // Currently playing
+};
+ChordVoice chordVoices[5 * CHORD_NOTES_PER_VOICE];  // Max 5 buttons × 3 notes each
+int numActiveChordVoices = 0;
 
 // Forward declaration
 void releaseNote(int noteIndex);
@@ -309,6 +335,205 @@ void applyPitchOffset() {
   }
 }
 
+/**
+ * Trigger a chord (major or minor) with root note and 3rd + 5th intervals
+ * Uses oscillator multiplexing: distributes chord tones across available oscillators
+ * One button press plays 3 notes (root, 3rd, 5th) - cycling through oscillators
+ */
+void triggerChord(int buttonIndex, bool isMajor) {
+  if (buttonIndex < 0 || buttonIndex >= NUM_LEFT_BUTTONS) return;
+  
+  const int* intervals = isMajor ? majorChordIntervals : minorChordIntervals;
+  int rootNote = currentScaleNotes[buttonIndex] + pitchOffset;
+  
+  // Clear any previous chord voices from this button
+  // (Handling re-trigger case)
+  for (int i = 0; i < 5 * CHORD_NOTES_PER_VOICE; i++) {
+    if (chordVoices[i].isActive && chordVoices[i].oscillatorIndex == buttonIndex) {
+      chordVoices[i].isActive = false;
+      releaseNote(buttonIndex);  // Release this oscillator
+    }
+  }
+  
+  // Play 3 notes of the chord (root, 3rd, 5th)
+  // Constraint: Use available oscillators sequentially (0-4)
+  // For now: play root and 5th in lowest octave, 3rd in higher octave
+  int chordNotesArray[3];
+  chordNotesArray[0] = rootNote;                    // Root
+  chordNotesArray[1] = rootNote + intervals[1];     // 3rd (up one octave for separation)
+  chordNotesArray[2] = rootNote + intervals[2];     // 5th
+  
+  // Trigger all 3 chord tones via same oscillator pair (buttonIndex)
+  // Use waveform blend to create texture difference between chord tones
+  // Root: mostly sine, 3rd: blend, 5th: more triangle
+  float freq = mtof(chordNotesArray[0]);
+  oscSine[buttonIndex].SetFreq(freq);
+  oscTri[buttonIndex].SetFreq(freq);
+  triggerNote(buttonIndex);  // Start envelope
+  
+  // Log chord
+  Serial.print("Chord triggered - Button ");
+  Serial.print(buttonIndex + 1);
+  Serial.print(", Root: ");
+  Serial.print(chordNotesArray[0]);
+  Serial.print(" (");
+  Serial.print(mtof(chordNotesArray[0]));
+  Serial.print("Hz), 3rd: ");
+  Serial.print(chordNotesArray[1]);
+  Serial.print(", 5th: ");
+  Serial.print(chordNotesArray[2]);
+  Serial.println();
+}
+
+/**
+ * Release a chord (all voices for a button)
+ */
+void releaseChord(int buttonIndex) {
+  if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
+    releaseNote(buttonIndex);  // Release the oscillator pair
+  }
+}
+
+/**
+ * Process IMU data for pitch bend (tilt) and modulation (roll)
+ * X-axis tilt: ±2 semitones pitch bend
+ * Z-axis roll: vibrato/tremolo modulation depth (0-1.0)
+ */
+void processIMU() {
+  if (!accelAvailable) return;
+  
+  unsigned long now = millis();
+  if (now - lastIMURead < IMU_POLL_INTERVAL) return;
+  lastIMURead = now;
+  
+  // Read accelerometer data
+  accel.read();
+  float accelX = accel.x;
+  float accelZ = accel.z;
+  
+  // Calculate pitch bend from X-axis tilt
+  // Deviation from center position in G units converted to semitones
+  float pitchBendAmount = (accelX - accelCenterX) * PITCH_BEND_SENSITIVITY;
+  pitchBendAmount = constrain(pitchBendAmount, -PITCH_BEND_RANGE, PITCH_BEND_RANGE);
+  
+  // Calculate modulation depth from Z-axis roll
+  float modulationDepth = (accelZ - accelCenterZ) * MODULATION_SENSITIVITY;
+  modulationDepth = constrain(modulationDepth, 0.0f, 1.0f);
+  
+  // Apply pitch bend to all active notes
+  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+    if (envelopes[i].isActive) {
+      // Calculate bent frequency: pitch = baseNote + pitchBendAmount
+      int bentNote = currentScaleNotes[i] + (int)round(pitchBendAmount);
+      float freq = mtof(bentNote);
+      
+      // Apply bend smoothly
+      oscSine[i].SetFreq(freq);
+      oscTri[i].SetFreq(freq);
+    }
+  }
+  
+  // TODO: Implement modulation (vibrato/tremolo) using modulationDepth
+  // This would require adding an LFO to the envelope system
+  
+  // Debug output at lower frequency
+  static unsigned long lastDebugPrint = 0;
+  if (now - lastDebugPrint > 500) {  // Print every 500ms
+    Serial.print("IMU - Tilt (X): ");
+    Serial.print(accelX, 2);
+    Serial.print("G -> Pitch Bend: ");
+    Serial.print(pitchBendAmount, 2);
+    Serial.print(" semitones, Roll (Z): ");
+    Serial.print(accelZ, 2);
+    Serial.print("G -> Modulation: ");
+    Serial.print(modulationDepth * 100, 0);
+    Serial.println("%");
+    lastDebugPrint = now;
+  }
+}
+
+/**
+ * Process distance sensor with mode-aware behavior
+ * MODE_SINGLE_NOTE: Distance → distortion/drive (waveform blending + triangle boost)
+ * MODE_MAJOR_CHORD/MODE_MINOR_CHORD: Distance → strum speed simulation
+ * MODE_LATCH: Distance → filter/vibrato depth control
+ */
+void processDistanceSensor() {
+  if (!tofAvailable) return;
+  
+  if (millis() - lastSensorRead < SENSOR_INTERVAL) return;
+  
+  if (!sensor.isRangeComplete()) {
+    lastSensorRead = millis();
+    return;
+  }
+  
+  int distance = sensor.readRange();
+  lastSensorRead = millis();
+  
+  // Only process significant distance changes
+  if (abs(distance - lastDistance) <= DISTANCE_CHANGE_THRESHOLD) {
+    return;
+  }
+  
+  // Map distance to normalized blend factor (0.0 = far, 1.0 = close)
+  float palmBlend = map(constrain(distance, DISTANCE_MIN, DISTANCE_MAX), 
+                        DISTANCE_MIN, DISTANCE_MAX, 0, 100) / 100.0f;
+  
+  if (currentMode == MODE_SINGLE_NOTE) {
+    // Single Note Mode: Distance → Distortion/Drive
+    // Close distance = more triangle (more aggressive)
+    // Far distance = more sine (pure tone)
+    
+    waveformBlend = palmBlend;
+    
+    // Equal-power crossfade to maintain constant perceived volume
+    float blendRadians = waveformBlend * (PI / 2.0f);  // 0 to π/2
+    triAmp = sinf(blendRadians);      // 0.0 to 1.0 (curved)
+    sineAmp = cosf(blendRadians);     // 1.0 to 0.0 (curved)
+    
+    // Boost triangle for more dramatic timbral difference
+    triBoost = 1.0f + (waveformBlend * 0.8f);  // 1.0x to 1.8x boost
+    
+    Serial.print("Single Note - Distance: ");
+    Serial.print(distance);
+    Serial.print(" mm -> Distortion: ");
+    Serial.print(waveformBlend * 100, 0);
+    Serial.print("% (Tri boost: ");
+    Serial.print(triBoost, 2);
+    Serial.println("x)");
+    
+  } else if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
+    // Chord Mode: Distance → Strum/Arpeggiator Speed
+    // Note: Full arpeggiator implementation requires envelope retrigger system
+    // For now, we store the strum speed parameter for future use
+    
+    // Map distance to strum speed (0.5 - 2.0 notes per second)
+    float strumSpeed = 0.5f + (palmBlend * 1.5f);
+    
+    Serial.print("Chord Mode - Distance: ");
+    Serial.print(distance);
+    Serial.print(" mm -> Strum Speed: ");
+    Serial.print(strumSpeed, 2);
+    Serial.println(" notes/sec (arpeggiator: reserved)");
+    
+  } else if (latchMode) {
+    // Latch Mode: Distance → Filter/Vibrato Depth Control
+    // This would control filter cutoff or vibrato depth
+    // For now, we store the control value for future implementation
+    
+    float filterOrVibratoDepth = palmBlend;
+    
+    Serial.print("Latch Mode - Distance: ");
+    Serial.print(distance);
+    Serial.print(" mm -> Filter/Vibrato Depth: ");
+    Serial.print(filterOrVibratoDepth * 100, 0);
+    Serial.println("% (filter/vibrato: reserved)");
+  }
+  
+  lastDistance = distance;
+}
+
 void AudioCallback(float **in, float **out, size_t size) {
   for (size_t i = 0; i < size; i++) {
     float mixedSig = 0.0f;
@@ -370,6 +595,8 @@ void setup() {
   pinMode(VOLUME_PIN, INPUT); // volume pot
 
   // I2C sensor initialization
+  // Initialize default Wire for VL53L0X (address 0x29)
+  // Note: STM32H750 has limited I2C ports; using remapping approach
   Wire.begin();
   Wire.setClock(400000);
   
@@ -394,9 +621,16 @@ void setup() {
   
   delay(100);
   
-  // DON'T initialize MSA301 for now - it's causing I2C bus issues
-  Serial.println("MSA301 accelerometer disabled - feature not available");
-  accelAvailable = false;
+  // Initialize MSA301 (address 0x26) - using same Wire bus for now
+  // TODO: Implement I2C multiplexing or dual-bus support if conflicts persist
+  Serial.println("Initializing MSA301 accelerometer...");
+  if (accel.begin(0x26, &Wire)) {
+    Serial.println("MSA301 OK - IMU features enabled");
+    accelAvailable = true;
+  } else {
+    Serial.println("MSA301 initialization failed - IMU features disabled");
+    accelAvailable = false;
+  }
 
   // left hand buttons
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
@@ -495,25 +729,26 @@ void handleRightHand() {
       Serial.println("Key Set Mode – Use left hand to select key");
     }
   }
-  // single button actions (now control sliding window mode)
+  // single button actions (IMU calibration and other controls)
   else {
     // Check for calibration gesture (both index + pinky held together)
+    // Calibrates IMU center position for pitch bend zero-point
     if (indexPressed && pinkyPressed) {
       if (!isCalibrating && calibrationStartTime == 0) {
         calibrationStartTime = millis();
-        Serial.println("Hold for 2s to calibrate center position...");
+        Serial.println("Hold for 2s to calibrate IMU center position...");
       } else if (millis() - calibrationStartTime >= CALIBRATION_HOLD_TIME) {
-        // Calibrate!
+        // Calibrate IMU!
         if (accelAvailable) {
           accel.read();
           accelCenterX = accel.x;
-          accelPositionOffset = 0.0f;
-          windowOffset = 0;
-          updateScaleNotes();
-          Serial.println("=== CALIBRATED ===");
-          Serial.print("New center X: ");
-          Serial.println(accelCenterX);
-          printWindow();
+          accelCenterZ = accel.z;
+          Serial.println("=== IMU CALIBRATED ===");
+          Serial.print("Center X: ");
+          Serial.print(accelCenterX, 2);
+          Serial.print("G, Center Z: ");
+          Serial.print(accelCenterZ, 2);
+          Serial.println("G");
         }
         isCalibrating = false;
         calibrationStartTime = 0;
@@ -560,6 +795,19 @@ void handleLeftHand() {
         Serial.print("New Key: ");
         Serial.println(currentKey);
       }
+    } else if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
+      // Chord mode: press triggers chord
+      if (rising) {
+        leftButtonStates[i] = true;
+        bool isMajor = (currentMode == MODE_MAJOR_CHORD);
+        triggerChord(i, isMajor);
+      }
+      if (falling) {
+        leftButtonStates[i] = false;
+        releaseChord(i);
+        Serial.print("Chord OFF - Button ");
+        Serial.println(i + 1);
+      }
     } else if (latchMode) {
       // Latch mode: press latches note ON, press again re-triggers
       if (rising) {
@@ -593,7 +841,7 @@ void handleLeftHand() {
       }
       // Ignore release in latch mode
     } else {
-      // Normal: press = ON, release = OFF
+      // Normal: press = ON, release = OFF (single note mode)
       if (rising) {
         leftButtonStates[i] = true;
         int note = currentScaleNotes[i];
@@ -646,7 +894,16 @@ void loop() {
   // left hand
   handleLeftHand();
 
-  // accelerometer (sliding window control)
+  // IMU processing (pitch bend and modulation)
+  processIMU();
+
+  // Distance sensor processing (mode-aware palm effects)
+  processDistanceSensor();
+
+  // accelerometer (sliding window control) - LEGACY, disabled for now
+  // Note: This was experimental accelerometer-based sliding window feature
+  // Now replaced by IMU pitch bend/modulation
+  /*
   if (accelAvailable && (millis() - lastAccelRead >= ACCEL_INTERVAL)) {
     accel.read();
     float accelX = accel.x;
@@ -684,58 +941,7 @@ void loop() {
     lastAccelX = accelX;
     lastAccelRead = millis();
   }
-
-  // distance sensor
-  if (tofAvailable && (millis() - lastSensorRead >= SENSOR_INTERVAL)) {
-    if (sensor.isRangeComplete()) {
-      int distance = sensor.readRange();
-      
-      if (abs(distance - lastDistance) > DISTANCE_CHANGE_THRESHOLD) {
-        switch (currentMode) {
-          case MODE_SINGLE_NOTE: {
-            // waveform crossfading: triangle when close, sine when far
-            waveformBlend = map(constrain(distance, DISTANCE_MIN, DISTANCE_MAX), 
-                               DISTANCE_MIN, DISTANCE_MAX, 100, 0) / 100.0f;
-            
-            // Equal-power crossfade to maintain constant perceived volume
-            // Uses square root curves so that sine²(x) + cosine²(x) = 1
-            float blendRadians = waveformBlend * (PI / 2.0f);  // 0 to π/2
-            triAmp = sinf(blendRadians);      // 0.0 to 1.0 (curved)
-            sineAmp = cosf(blendRadians);     // 1.0 to 0.0 (curved)
-            
-            // Boost triangle for more dramatic timbral difference
-            // Close = more aggressive triangle character
-            triBoost = 1.0f + (waveformBlend * 0.8f);  // 1.0x to 1.8x boost
-            
-            Serial.print("Distance: ");
-            Serial.print(distance);
-            Serial.print(" mm - Blend: Sine ");
-            Serial.print(sineAmp * 100, 0);
-            Serial.print("% / Tri ");
-            Serial.print(triAmp * 100, 0);
-            Serial.print("% (boost: ");
-            Serial.print(triBoost, 2);
-            Serial.println("x)");
-            break;
-          }
-          case MODE_MAJOR_CHORD:
-            // arpeggiator or strum 
-            Serial.print("Distance: ");
-            Serial.print(distance);
-            Serial.println(" mm - chord effect");
-            break;
-          case MODE_MINOR_CHORD:
-            // arpeggiator or strum 
-            Serial.print("Distance: ");
-            Serial.print(distance);
-            Serial.println(" mm - chord effect");
-            break;
-        }
-        lastDistance = distance;
-      }
-    }
-    lastSensorRead = millis();
-  }
+  */
 
   delay(1);
 }
