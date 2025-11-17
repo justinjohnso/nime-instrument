@@ -1,20 +1,21 @@
 # Documentation Index
 
-This directory contains all project documentation for the NIME Two-Handed Musical Controller.
+This directory contains project documentation for the NIME Two-Handed Musical Controller.
 
 ## Quick Navigation
 
-### User Documentation
-- **[Control Reference](./CONTROL_REFERENCE.md)** - Complete visual reference for button mappings, performance workflows, and hardware pinout
+### User Documentation (Reference)
+- **[Control Reference](./reference/CONTROL_REFERENCE.md)** - Complete visual reference for button mappings, performance workflows, and hardware pinout
 
-### Development Blog
-- **[blog/](./blog/)** - Development logs and progress updates
-  - [2025-09-29: Making the controller playable](./blog/2025-09-29-nime-instrument-update.md)
+### Technical Documentation (Evergreen)
+- **[Architecture Overview](./technical/ARCHITECTURE_OVERVIEW.md)** - Complete system architecture, design patterns, and implementation details
+- **[Implementation Plan](./technical/IMPLEMENTATION_PLAN.md)** - Feature roadmap and development plan for missing functionality
 
-### Technical Documentation
-- **[technical/](./technical/)** - In-depth technical documentation
-  - [Architecture Overview](./technical/ARCHITECTURE_OVERVIEW.md) - Complete system architecture, design patterns, and implementation details
-  - [Code Review Summary](./technical/CODE_REVIEW_SUMMARY.md) - Code quality assessment and improvement notes
+### Archived Documentation (Temporarily Useful)
+- **[archive/](./archive/)** - Development logs, quick references, and point-in-time reviews (see .gitignore)
+  - `blog/` - Development logs and progress updates
+  - `CHEAT_SHEET.md` - Quick reference (may become outdated as features change)
+  - `CODE_REVIEW_SUMMARY.md` - Code review from October 2025
 
 ## Document Purposes
 
@@ -42,10 +43,11 @@ This directory contains all project documentation for the NIME Two-Handed Musica
 
 When adding new documentation:
 
-1. **User-facing guides** → Root of `/docs`
-2. **Development logs** → `/docs/blog` with date prefix (YYYY-MM-DD-title.md)
-3. **Technical documentation** → `/docs/technical`
-4. Update this index when adding major documents
+1. **User-facing reference guides** → `/docs/reference/`
+2. **Evergreen technical documentation** → `/docs/technical/`
+3. **Development logs** → `/docs/archive/blog/` with date prefix (YYYY-MM-DD-title.md)
+4. **Point-in-time reviews** (code reviews, progress snapshots) → `/docs/archive/`
+5. Update this index when adding major documents
 
 ## Documentation Standards
 

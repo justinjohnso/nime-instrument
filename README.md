@@ -34,7 +34,7 @@ A gesture-augmented, two-handed musical instrument controller built on the Elect
 #### Analog Controls
 - Volume Pot: A5
 
-See [`CONTROL_REFERENCE.md`](./docs/CONTROL_REFERENCE.md) for complete control mapping.
+See [`CONTROL_REFERENCE.md`](./docs/reference/CONTROL_REFERENCE.md) for complete control mapping.
 
 ## Installation
 
@@ -101,7 +101,7 @@ All dependencies are managed automatically by PlatformIO:
 - Thumb + Pinky: Toggle latch mode
 - Middle + Ring: Enter key selection mode
 
-See [`docs/CONTROL_REFERENCE.md`](./docs/CONTROL_REFERENCE.md) for complete control mapping and performance tips.
+See [`CONTROL_REFERENCE.md`](./docs/reference/CONTROL_REFERENCE.md) for complete control mapping and performance tips.
 
 ### Default Settings
 
@@ -119,11 +119,16 @@ nime-midi-controller/
 ├── src/
 │   └── main.cpp              # Main application code
 ├── docs/
-│   ├── CONTROL_REFERENCE.md  # Visual control reference
-│   ├── ARCHITECTURE_OVERVIEW.md  # Technical architecture
-│   ├── CODE_REVIEW_SUMMARY.md    # Development notes
-│   └── blog/
-│       └── 2025-09-29-nime-instrument-update.md
+│   ├── README.md             # Documentation index
+│   ├── reference/
+│   │   └── CONTROL_REFERENCE.md  # Visual control reference
+│   ├── technical/
+│   │   └── ARCHITECTURE_OVERVIEW.md  # Technical architecture
+│   └── archive/              # Temporary docs (in .gitignore)
+│       ├── blog/
+│       │   └── 2025-09-29-nime-instrument-update.md
+│       ├── CHEAT_SHEET.md
+│       └── CODE_REVIEW_SUMMARY.md
 ├── platformio.ini            # PlatformIO configuration
 ├── README.md                 # This file
 └── include/                  # Header files (if any)
@@ -199,7 +204,7 @@ pio device monitor --baud 115200
 - **Synthesis:** Dual oscillator per note (sine + triangle) with equal-power crossfade
 - **Polyphony:** 5 simultaneous notes maximum
 
-See [`docs/ARCHITECTURE_OVERVIEW.md`](./docs/ARCHITECTURE_OVERVIEW.md) for detailed technical documentation.
+See [`ARCHITECTURE_OVERVIEW.md`](./docs/technical/ARCHITECTURE_OVERVIEW.md) for detailed technical documentation.
 
 ## Musical Design
 
@@ -208,7 +213,7 @@ This instrument is designed around **constraint-based performance**:
 - Gestural timbral control provides visual, audience-readable expression
 - Limited buttons with modal switching balance simplicity and capability
 
-See the [blog post](./docs/blog/2025-09-29-nime-instrument-update.md) for design rationale and development notes.
+See the [blog post](./docs/archive/blog/2025-09-29-nime-instrument-update.md) for design rationale and development notes.
 
 ## Future Enhancements
 
