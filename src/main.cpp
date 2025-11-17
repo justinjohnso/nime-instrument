@@ -22,6 +22,11 @@
 #include <Adafruit_MSA301.h>
 #include <Wire.h>
 
+// Create separate I2C bus for MSA301 (I2C4 on D13/D14)
+// TwoWire constructor: TwoWire(SDA_PIN, SCL_PIN)
+// Note: STM32 pin names used as per DaisyDuino convention
+TwoWire Wire1(PB_9, PB_8);  // I2C4: SDA=D14 (PB_9), SCL=D13 (PB_8)
+
 DaisyHardware hw;
 Oscillator oscSine[5];  // Sine oscillators for each button
 Oscillator oscTri[5];   // Triangle oscillators for each button
@@ -38,6 +43,17 @@ struct NoteEnvelope {
 };
 NoteEnvelope envelopes[5];
 
+// Chord tone tracking (for multi-note chord playback)
+struct ChordNote {
+  int midiNote;             // MIDI note to play
+  int sineOscIdx;           // Which sine oscillator (0-4)
+  int triOscIdx;            // Which tri oscillator (0-4)
+  bool isActive;            // Currently playing
+};
+const int MAX_CHORD_NOTES = 15;  // 5 buttons × 3 notes each
+ChordNote chordNotes[MAX_CHORD_NOTES];
+int numActiveChordNotes = 0;
+
 // Volume Control
 const int VOLUME_PIN = A5;
 const int VOLUME_CHANGE_THRESHOLD = 10;  // ADC counts hysteresis to reduce jitter
@@ -51,18 +67,13 @@ int lastVolumeRaw = -1;
 // Distance Sensor (VL53L0X Time-of-Flight)
 Adafruit_VL53L0X sensor = Adafruit_VL53L0X();
 
-// Accelerometer (MSA301 3-axis)
-Adafruit_MSA301 accel = Adafruit_MSA301();
+// Accelerometer (MSA311 3-axis) - I2C address 0x62
+Adafruit_MSA311 accel = Adafruit_MSA311();
 bool accelAvailable = false;
 
-// IMU calibration and pitch bend parameters
-float accelCenterX = 0.0f;              // Calibrated center X acceleration (tilt axis)
-float accelCenterZ = 0.0f;              // Calibrated center Z acceleration (roll axis)
-const float PITCH_BEND_RANGE = 2.0f;    // ±2 semitones from IMU tilt
-const float PITCH_BEND_SENSITIVITY = 0.3f;  // Acceleration to semitones conversion
-const float MODULATION_SENSITIVITY = 0.15f; // Acceleration to modulation depth
-unsigned long lastIMURead = 0;
-const unsigned long IMU_POLL_INTERVAL = 20; // 50Hz polling
+// IMU calibration parameters
+float accelCenterX = 0.0f;              // Calibrated center X acceleration (for pitch window)
+float accelCenterZ = 0.0f;              // Calibrated center Z acceleration (unused, kept for symmetry)
 
 // Distance sensor parameters
 const int DISTANCE_CHANGE_THRESHOLD = 5;      // Minimum change in mm to process
@@ -74,16 +85,20 @@ unsigned long lastSensorRead = 0;
 bool tofAvailable = false;
 
 // Sliding Window (Accelerometer-based note selection via tilt)
-// Allows navigating up/down through available scale notes by tilting left/right
+// Offset is tracked in SEMITONES (for consistent range across all scales)
+// But snaps to scale degrees when playing notes (locks to current scale)
 const int WINDOW_SIZE = 5;                    // Number of notes in window
-int windowOffset = 0;                         // Current offset in semitones within scale
-const int MAX_WINDOW_OFFSET = 24;             // ±2 octaves
+int windowOffsetSemitones = 0;                // Current offset in SEMITONES (not scale degrees)
+int windowOffsetDegrees = 0;                  // Display/UI only: nearest scale degree to current offset
+const int MAX_WINDOW_OFFSET_SEMITONES = 36;  // ±36 semitones max (3 octaves, consistent across all scales)
 float accelPositionOffset = 0.0f;             // Integrated position from center
 float lastAccelX = 0.0f;                      // Previous X acceleration
+float smoothedAccelX = 0.0f;                  // Low-pass filtered accelX
 unsigned long lastAccelRead = 0;
 const unsigned long ACCEL_INTERVAL = 20;      // 50Hz polling
-const float COARSE_SENSITIVITY = 8.0f;        // Semitones per second of movement (index)
-const float FINE_SENSITIVITY = 2.0f;          // Semitones per second of movement (pinky)
+const float WINDOW_SENSITIVITY = 0.02f;      // Semitones per G deviation (balanced range of motion)
+const float WINDOW_DEADZONE = 20.0f;          // Minimum acceleration deviation to activate window (in G)
+const float ACCEL_FILTER_ALPHA = 0.25f;       // Low-pass filter coefficient (0.0-1.0, higher = more responsive)
 
 // Calibration
 unsigned long calibrationStartTime = 0;
@@ -110,10 +125,10 @@ bool rightButtonPrevStates[NUM_RIGHT_BUTTONS] = {false};
 
 // Right Hand Button Mapping (array indices)
 enum RightHandButtons {
-  RIGHT_PINKY = 0,    // Octave down (D15)
+  RIGHT_PINKY = 0,    // Pitch window mode (D15) - tilt left/right to slide through scale
   RIGHT_RING = 1,     // Momentary flat (D16)
   RIGHT_MIDDLE = 2,   // Momentary sharp (D17)
-  RIGHT_INDEX = 3,    // Octave up (D18)
+  RIGHT_INDEX = 3,    // Calibrate (D18) - hold with pinky for 2s
   RIGHT_THUMB = 4     // SHIFT key (D19)
 };
 
@@ -136,15 +151,15 @@ int pitchOffset = 0;                    // Momentary sharp/flat in semitones
 
 enum ScaleType {
   SCALE_MAJOR_PENTATONIC = 0,
-  SCALE_BLUES = 1,
+  SCALE_MINOR_PENTATONIC = 1,
   SCALE_CHROMATIC = 2
 };
 int currentScale = SCALE_MAJOR_PENTATONIC;
 
 // Scale intervals (semitones from root, mapped to 5 buttons)
 const int majorPentatonic[] = {0, 2, 4, 7, 9};    // C, D, E, G, A
-const int bluesScale[] = {0, 3, 5, 6, 7};         // C, Eb, F, F#, G  
-const int chromaticScale[] = {0, 1, 2, 3, 4};     // C, C#, D, D#, E
+const int minorPentatonic[] = {0, 3, 5, 7, 10};   // C, Eb, F, G, Bb
+const int chromaticScale[] = {0, 1, 2, 3, 4};     // C, C#, D, D#, E (chromatic uses raw semitone offsets, not scale degrees)
 
 int currentScaleNotes[NUM_LEFT_BUTTONS];          // Current MIDI note numbers
 
@@ -213,12 +228,12 @@ void clearAllLatchedNotes() {
 }
 
 /**
- * Update the current scale notes based on octave, key, scale type, and window offset
+ * Update the current scale notes based on octave, key, and scale type
  * Calculates MIDI note numbers for each of the 5 buttons
- * Window offset allows sliding through the scale
+ * Window offset (in scale degrees) is applied dynamically when playing notes
  */
 void updateScaleNotes() {
-  int baseNote = (currentOctave * 12) + currentKey + windowOffset;
+  int baseNote = (currentOctave * 12) + currentKey;
 
   switch (currentScale) {
     case SCALE_MAJOR_PENTATONIC:
@@ -226,9 +241,9 @@ void updateScaleNotes() {
         currentScaleNotes[i] = baseNote + majorPentatonic[i];
       }
       break;
-    case SCALE_BLUES:
+    case SCALE_MINOR_PENTATONIC:
       for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
-        currentScaleNotes[i] = baseNote + bluesScale[i];
+        currentScaleNotes[i] = baseNote + minorPentatonic[i];
       }
       break;
     case SCALE_CHROMATIC:
@@ -240,17 +255,87 @@ void updateScaleNotes() {
 };
 
 /**
+ * Convert scale degree offset to semitone offset
+ * Maps degree indices to scale positions (handles octave wrapping)
+ * Example: Major Pentatonic {0, 2, 4, 7, 9}
+ *   scaleDegreesToSemitones(1) = 2 (degree 1 → position 1 → 2 semitones)
+ *   scaleDegreesToSemitones(5) = 12 (degree 5 → octave 1 + position 0 → 12 semitones)
+ */
+int scaleDegreesToSemitones(int degrees) {
+  if (degrees == 0) return 0;
+  
+  const int* scaleIntervals = nullptr;
+  int scaleLength = 5;
+  
+  switch (currentScale) {
+    case SCALE_MAJOR_PENTATONIC:
+      scaleIntervals = majorPentatonic;
+      break;
+    case SCALE_MINOR_PENTATONIC:
+      scaleIntervals = minorPentatonic;
+      break;
+    case SCALE_CHROMATIC:
+      scaleIntervals = chromaticScale;
+      break;
+  }
+  
+  int direction = (degrees > 0) ? 1 : -1;
+  int absDegrees = abs(degrees);
+  
+  // Calculate which octave and position within octave
+  int octaves = absDegrees / scaleLength;
+  int posInOctave = absDegrees % scaleLength;
+  
+  // Semitones = octave offset (12 per octave) + scale position
+  int semitones = (octaves * 12) + scaleIntervals[posInOctave];
+  
+  return semitones * direction;
+}
+
+/*
+ * Convert a semitone offset to the nearest scale degree
+ * (inverse of scaleDegreesToSemitones)
+ * Searches all degrees to find the true nearest (no early break, octave wrapping is non-monotonic)
+ */
+int semitoneOffsetToNearestScaleDegree(int semitoneOffset) {
+  if (semitoneOffset == 0) return 0;
+  
+  int direction = (semitoneOffset > 0) ? 1 : -1;
+  int targetSemitones = abs(semitoneOffset);
+  int bestDegree = 0;
+  int bestDistance = abs(scaleDegreesToSemitones(0) - targetSemitones);
+  
+  // Search all possible degrees (no early break - octave wrapping creates non-monotonic distance)
+  for (int d = 1; d <= MAX_WINDOW_OFFSET_SEMITONES; d++) {
+    int semitones = abs(scaleDegreesToSemitones(d));
+    int distance = abs(semitones - targetSemitones);
+    
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestDegree = d;
+    }
+  }
+  
+  return bestDegree * direction;
+}
+
+/**
  * Print current sliding window information
  */
 void printWindow() {
   Serial.print("Window: ");
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
-    Serial.print(currentScaleNotes[i]);
+    Serial.print(currentScaleNotes[i] + windowOffsetSemitones);
     if (i < NUM_LEFT_BUTTONS - 1) Serial.print(", ");
   }
   Serial.print(" (offset: ");
-  Serial.print(windowOffset);
-  Serial.println(" semitones)");
+  Serial.print(windowOffsetSemitones);
+  Serial.print(" semitones");
+  if (windowOffsetDegrees != 0) {
+    Serial.print(" / degree ");
+    Serial.print(windowOffsetDegrees);
+  }
+  Serial.println(")");
 }
 
 /**
@@ -336,8 +421,8 @@ void applyPitchOffset() {
 
 /**
  * Trigger a chord (major or minor) with root note and 3rd + 5th intervals
- * Uses oscillator multiplexing: distributes chord tones across available oscillators
- * One button press plays 3 notes (root, 3rd, 5th) - cycling through oscillators
+ * Distributes 3 chord tones across available oscillators (0-4)
+ * Each chord uses 3 oscillator indices from the pool
  */
 void triggerChord(int buttonIndex, bool isMajor) {
   if (buttonIndex < 0 || buttonIndex >= NUM_LEFT_BUTTONS) return;
@@ -345,39 +430,49 @@ void triggerChord(int buttonIndex, bool isMajor) {
   const int* intervals = isMajor ? majorChordIntervals : minorChordIntervals;
   int rootNote = currentScaleNotes[buttonIndex] + pitchOffset;
   
-  // Clear any previous chord voices from this button
-  // (Handling re-trigger case)
-  for (int i = 0; i < 5 * CHORD_NOTES_PER_VOICE; i++) {
-    if (chordVoices[i].isActive && chordVoices[i].oscillatorIndex == buttonIndex) {
-      chordVoices[i].isActive = false;
-      releaseNote(buttonIndex);  // Release this oscillator
+  // Clear any previous chord tones from this button
+  for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+    if (chordNotes[i].isActive && chordNotes[i].sineOscIdx == buttonIndex) {
+      chordNotes[i].isActive = false;
     }
   }
   
-  // Play 3 notes of the chord (root, 3rd, 5th)
-  // Constraint: Use available oscillators sequentially (0-4)
-  // For now: play root and 5th in lowest octave, 3rd in higher octave
+  // Build 3-note chord
   int chordNotesArray[3];
   chordNotesArray[0] = rootNote;                    // Root
-  chordNotesArray[1] = rootNote + intervals[1];     // 3rd (up one octave for separation)
+  chordNotesArray[1] = rootNote + intervals[1];     // 3rd
   chordNotesArray[2] = rootNote + intervals[2];     // 5th
   
-  // Trigger all 3 chord tones via same oscillator pair (buttonIndex)
-  // Use waveform blend to create texture difference between chord tones
-  // Root: mostly sine, 3rd: blend, 5th: more triangle
-  float freq = mtof(chordNotesArray[0]);
-  oscSine[buttonIndex].SetFreq(freq);
-  oscTri[buttonIndex].SetFreq(freq);
-  triggerNote(buttonIndex);  // Start envelope
+  // Assign oscillators: use buttonIndex + offset for each chord note
+  // Simple allocation: chord notes use oscillators in sequence
+  int oscOffset = (buttonIndex * 3) % 5;  // Spread chords across available oscillators
+  
+  for (int noteIdx = 0; noteIdx < 3; noteIdx++) {
+    if (numActiveChordNotes < MAX_CHORD_NOTES) {
+      ChordNote &cn = chordNotes[numActiveChordNotes];
+      cn.midiNote = chordNotesArray[noteIdx];
+      cn.sineOscIdx = (oscOffset + noteIdx) % NUM_LEFT_BUTTONS;
+      cn.triOscIdx = (oscOffset + noteIdx) % NUM_LEFT_BUTTONS;
+      cn.isActive = true;
+      
+      // Set frequency immediately
+      float freq = mtof(cn.midiNote);
+      oscSine[cn.sineOscIdx].SetFreq(freq);
+      oscTri[cn.triOscIdx].SetFreq(freq);
+      triggerNote(cn.sineOscIdx);
+      
+      numActiveChordNotes++;
+    }
+  }
   
   // Log chord
   Serial.print("Chord triggered - Button ");
   Serial.print(buttonIndex + 1);
-  Serial.print(", Root: ");
-  Serial.print(chordNotesArray[0]);
   Serial.print(" (");
-  Serial.print(mtof(chordNotesArray[0]));
-  Serial.print("Hz), 3rd: ");
+  Serial.print(isMajor ? "Major" : "Minor");
+  Serial.print(") - Root: ");
+  Serial.print(chordNotesArray[0]);
+  Serial.print(", 3rd: ");
   Serial.print(chordNotesArray[1]);
   Serial.print(", 5th: ");
   Serial.print(chordNotesArray[2]);
@@ -389,67 +484,25 @@ void triggerChord(int buttonIndex, bool isMajor) {
  */
 void releaseChord(int buttonIndex) {
   if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
-    releaseNote(buttonIndex);  // Release the oscillator pair
+    // Release all chord notes associated with this button
+    for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+      if (chordNotes[i].isActive && chordNotes[i].sineOscIdx == buttonIndex) {
+        releaseNote(chordNotes[i].sineOscIdx);
+        chordNotes[i].isActive = false;
+      }
+    }
+    // Compact the array
+    int writeIdx = 0;
+    for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+      if (chordNotes[i].isActive) {
+        chordNotes[writeIdx++] = chordNotes[i];
+      }
+    }
+    numActiveChordNotes = writeIdx;
   }
 }
 
-/**
- * Process IMU data for pitch bend (tilt) and modulation (roll)
- * X-axis tilt: ±2 semitones pitch bend
- * Z-axis roll: vibrato/tremolo modulation depth (0-1.0)
- */
-void processIMU() {
-  if (!accelAvailable) return;
-  
-  unsigned long now = millis();
-  if (now - lastIMURead < IMU_POLL_INTERVAL) return;
-  lastIMURead = now;
-  
-  // Read accelerometer data
-  accel.read();
-  float accelX = accel.x;
-  float accelZ = accel.z;
-  
-  // Calculate pitch bend from X-axis tilt
-  // Deviation from center position in G units converted to semitones
-  float pitchBendAmount = (accelX - accelCenterX) * PITCH_BEND_SENSITIVITY;
-  pitchBendAmount = constrain(pitchBendAmount, -PITCH_BEND_RANGE, PITCH_BEND_RANGE);
-  
-  // Calculate modulation depth from Z-axis roll
-  float modulationDepth = (accelZ - accelCenterZ) * MODULATION_SENSITIVITY;
-  modulationDepth = constrain(modulationDepth, 0.0f, 1.0f);
-  
-  // Apply pitch bend to all active notes
-  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
-    if (envelopes[i].isActive) {
-      // Calculate bent frequency: pitch = baseNote + pitchBendAmount
-      int bentNote = currentScaleNotes[i] + (int)round(pitchBendAmount);
-      float freq = mtof(bentNote);
-      
-      // Apply bend smoothly
-      oscSine[i].SetFreq(freq);
-      oscTri[i].SetFreq(freq);
-    }
-  }
-  
-  // TODO: Implement modulation (vibrato/tremolo) using modulationDepth
-  // This would require adding an LFO to the envelope system
-  
-  // Debug output at lower frequency
-  static unsigned long lastDebugPrint = 0;
-  if (now - lastDebugPrint > 500) {  // Print every 500ms
-    Serial.print("IMU - Tilt (X): ");
-    Serial.print(accelX, 2);
-    Serial.print("G -> Pitch Bend: ");
-    Serial.print(pitchBendAmount, 2);
-    Serial.print(" semitones, Roll (Z): ");
-    Serial.print(accelZ, 2);
-    Serial.print("G -> Modulation: ");
-    Serial.print(modulationDepth * 100, 0);
-    Serial.println("%");
-    lastDebugPrint = now;
-  }
-}
+
 
 /**
  * Process distance sensor with mode-aware behavior
@@ -484,7 +537,7 @@ void processDistanceSensor() {
     // Close distance = more triangle (more aggressive)
     // Far distance = more sine (pure tone)
     
-    waveformBlend = palmBlend;
+    waveformBlend = 1.0f - palmBlend;  // Invert: far (high distance) = pure sine, close = triangle
     
     // Equal-power crossfade to maintain constant perceived volume
     float blendRadians = waveformBlend * (PI / 2.0f);  // 0 to π/2
@@ -569,6 +622,12 @@ void AudioCallback(float **in, float **out, size_t size) {
 
 void setup() {
   Serial.begin(115200);
+  delay(500);  // Increased from 100ms to ensure serial is ready
+  
+  // MARKER: Identify firmware version for dual-wire I2C test
+  Serial.println("\n========================================");
+  Serial.println("FIRMWARE BUILD: Dual-Wire I2C (Wire1 test)");
+  Serial.println("========================================\n");
 
   // init Daisy
   hw = DAISY.init(DAISY_SEED, AUDIO_SR_48K);
@@ -593,42 +652,54 @@ void setup() {
   DAISY.begin(AudioCallback); // start audio processing
   pinMode(VOLUME_PIN, INPUT); // volume pot
 
-  // I2C sensor initialization
-  // Initialize default Wire for VL53L0X (address 0x29)
-  // Note: STM32H750 has limited I2C ports; using remapping approach
+  // I2C sensor initialization - Both sensors on I2C1
+  // Daisy Seed STM32H750 I2C1: D12 (SDA), D11 (SCL)
+  // Both VL53L0X (0x29) and MSA311 (0x62) on same bus
+  // VL53L0X continuous ranging deferred until after MSA311 init to avoid contention
+
+  // Initialize I2C1 (default Wire object)
+  Serial.println("Initializing Wire (I2C1)...");
   Wire.begin();
   Wire.setClock(400000);
   
-  delay(100);  // Give I2C bus time to stabilize
+  delay(200);  // Give I2C bus time to stabilize
   
-  // ALWAYS run I2C scan first to see what's connected
-  Serial.println("=== Running I2C scan ===");
+  // Run I2C scan to see what's connected
+  Serial.println("\n=== I2C Scan on Bus 1 ===");
   i2cScan();
-  Serial.println("=== Scan complete ===");
+  Serial.println("=== Scan complete ===\n");
   
   delay(100);
   
-  // Initialize VL53L0X (address 0x29)
-  Serial.println("Initializing VL53L0X ToF sensor...");
-  if (sensor.begin()) {
-    Serial.println("VL53L0X OK - starting continuous ranging");
-    sensor.startRangeContinuous();
+  // Initialize VL53L0X (address 0x29) on I2C1
+  Serial.println("Initializing VL53L0X ToF sensor (0x29) on I2C1...");
+  if (sensor.begin(0x29, false, &Wire)) {
+    Serial.println("✓ VL53L0X OK");
     tofAvailable = true;
   } else {
-    Serial.println("VL53L0X initialization failed - continuing without ToF");
+    Serial.println("✗ VL53L0X initialization failed");
+    tofAvailable = false;
   }
   
-  delay(100);
+  delay(200);  // Sensor stabilization
   
-  // Initialize MSA301 (address 0x26) - using same Wire bus for now
-  // TODO: Implement I2C multiplexing or dual-bus support if conflicts persist
-  Serial.println("Initializing MSA301 accelerometer...");
-  if (accel.begin(0x26, &Wire)) {
-    Serial.println("MSA301 OK - IMU features enabled");
+  // Initialize MSA311 (address 0x62) on I2C1
+  Serial.println("Initializing MSA311 accelerometer (0x62) on I2C1...");
+  if (accel.begin(0x62, &Wire)) {
+    Serial.println("✓ MSA311 OK - IMU features enabled");
     accelAvailable = true;
   } else {
-    Serial.println("MSA301 initialization failed - IMU features disabled");
+    Serial.println("✗ MSA311 initialization failed");
     accelAvailable = false;
+  }
+  
+  delay(150);
+  
+  // Start VL53L0X continuous ranging AFTER both sensors initialized
+  // This avoids I2C bus contention during initialization
+  if (tofAvailable) {
+    Serial.println("Starting VL53L0X continuous ranging...");
+    sensor.startRangeContinuous();
   }
 
   // left hand buttons
@@ -655,6 +726,22 @@ void handleRightHand() {
   bool middlePressed = rightButtonStates[RIGHT_MIDDLE];
   bool ringPressed = rightButtonStates[RIGHT_RING];
   bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
+  
+  // Debug: Log button combinations
+  static bool lastState[5] = {false};
+  if (indexPressed != lastState[RIGHT_INDEX] || pinkyPressed != lastState[RIGHT_PINKY] || thumbPressed != lastState[RIGHT_THUMB]) {
+    Serial.print("[BUTTONS] Thumb:");
+    Serial.print(thumbPressed ? "1" : "0");
+    Serial.print(" Index:");
+    Serial.print(indexPressed ? "1" : "0");
+    Serial.print(" Middle:");
+    Serial.print(middlePressed ? "1" : "0");
+    Serial.print(" Ring:");
+    Serial.print(ringPressed ? "1" : "0");
+    Serial.print(" Pinky:");
+    Serial.println(pinkyPressed ? "1" : "0");
+    for (int i = 0; i < 5; i++) lastState[i] = rightButtonStates[i];
+  }
 
   // Handle momentary sharp/flat (when thumb NOT pressed)
   if (!thumbPressed) {
@@ -690,9 +777,9 @@ void handleRightHand() {
       Serial.println("Scale: Major Pentatonic");
     }
     if (middlePressed && !rightButtonPrevStates[RIGHT_MIDDLE]) {
-      currentScale = SCALE_BLUES;
+      currentScale = SCALE_MINOR_PENTATONIC;
       updateScaleNotes();
-      Serial.println("Scale: Blues");
+      Serial.println("Scale: Minor Pentatonic");
     }
     if (ringPressed && !rightButtonPrevStates[RIGHT_RING]) {
       currentScale = SCALE_CHROMATIC;
@@ -742,6 +829,7 @@ void handleRightHand() {
           accel.read();
           accelCenterX = accel.x;
           accelCenterZ = accel.z;
+          accelPositionOffset = 0.0f;  // Reset pitch window offset after calibration
           Serial.println("=== IMU CALIBRATED ===");
           Serial.print("Center X: ");
           Serial.print(accelCenterX, 2);
@@ -813,7 +901,13 @@ void handleLeftHand() {
         if (!leftButtonStates[i]) {
           // Note was off, latch it on
           leftButtonStates[i] = true;
-          int note = currentScaleNotes[i];
+          int offsetToApply = windowOffsetSemitones;
+          // For non-chromatic scales, snap to scale degrees
+          if (currentScale != SCALE_CHROMATIC) {
+            int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+            offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
+          }
+          int note = currentScaleNotes[i] + offsetToApply;
           float freq = mtof(note);
           oscSine[i].SetFreq(freq);
           oscTri[i].SetFreq(freq);
@@ -827,7 +921,13 @@ void handleLeftHand() {
           Serial.println(" Hz)");
         } else {
           // Note already latched, re-trigger envelope
-          int note = currentScaleNotes[i];
+          int offsetToApply = windowOffsetSemitones;
+          // For non-chromatic scales, snap to scale degrees
+          if (currentScale != SCALE_CHROMATIC) {
+            int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+            offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
+          }
+          int note = currentScaleNotes[i] + offsetToApply;
           float freq = mtof(note);
           oscSine[i].SetFreq(freq);
           oscTri[i].SetFreq(freq);
@@ -843,7 +943,13 @@ void handleLeftHand() {
       // Normal: press = ON, release = OFF (single note mode)
       if (rising) {
         leftButtonStates[i] = true;
-        int note = currentScaleNotes[i];
+        int offsetToApply = windowOffsetSemitones;
+        // For non-chromatic scales, snap to scale degrees
+        if (currentScale != SCALE_CHROMATIC) {
+          int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+          offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
+        }
+        int note = currentScaleNotes[i] + offsetToApply;
         float freq = mtof(note);
         oscSine[i].SetFreq(freq);
         oscTri[i].SetFreq(freq);
@@ -854,7 +960,9 @@ void handleLeftHand() {
         Serial.print(note);
         Serial.print(" (");
         Serial.print(freq);
-        Serial.println(" Hz)");
+        Serial.print(" Hz, windowOffset: ");
+        Serial.print(windowOffsetSemitones);
+        Serial.println(" semitones)");
       }
       if (falling) {
         leftButtonStates[i] = false;
@@ -893,41 +1001,93 @@ void loop() {
   // left hand
   handleLeftHand();
 
-  // IMU processing (pitch bend and modulation)
-  processIMU();
-
   // Distance sensor processing (mode-aware palm effects)
   processDistanceSensor();
 
   // Pitch window control (accelerometer-based sliding through scale)
-  // Hold Pinky button alone + tilt left/right to navigate through available notes
-  if (accelAvailable && (millis() - lastAccelRead >= ACCEL_INTERVAL)) {
+  // Right Pinky: enables pitch window mode (tilt left hand to move window)
+  // Window locks in place when pinky is released
+  // If a note is held while pinky is active, the note pitch slides with the window
+  
+  bool indexPressed = rightButtonStates[RIGHT_INDEX];
+  bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
+  
+  // Check if any left buttons are actively playing
+  bool anyNoteActive = false;
+  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+    if (leftButtonStates[i] && envelopes[i].isActive) {
+      anyNoteActive = true;
+      break;
+    }
+  }
+  
+  // Pitch window mode: pinky enables, tilt left hand to slide window
+  // IMPORTANT: !indexPressed ensures index button disables pitch window (including calibration mode)
+  if (accelAvailable && pinkyPressed && !indexPressed && !rightButtonStates[RIGHT_THUMB] && (millis() - lastAccelRead >= ACCEL_INTERVAL)) {
     accel.read();
     float accelX = accel.x;
-    float deltaT = (millis() - lastAccelRead) / 1000.0f;  // Time in seconds
     
-    bool indexPressed = rightButtonStates[RIGHT_INDEX];
-    bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
+    // Apply low-pass filter to smooth accelerometer noise
+    smoothedAccelX = (ACCEL_FILTER_ALPHA * accelX) + ((1.0f - ACCEL_FILTER_ALPHA) * smoothedAccelX);
     
-    // Only activate pitch window if PINKY alone is pressed (not both for calibration)
-    if (pinkyPressed && !indexPressed) {
-      // Calculate velocity (change from center)
-      float velocity = accelX - accelCenterX;
+    // Calculate deviation from calibrated center (left hand tilt)
+    float deviation = smoothedAccelX - accelCenterX;
+    
+    // Debug: Print accel values every ~500ms for tuning
+    static unsigned long lastDebugPrint = 0;
+    if (millis() - lastDebugPrint >= 500) {
+      Serial.print("[ACCEL] Raw: ");
+      Serial.print(accelX, 1);
+      Serial.print("G, Smoothed: ");
+      Serial.print(smoothedAccelX, 1);
+      Serial.print("G, Deviation: ");
+      Serial.print(deviation, 1);
+      Serial.print("G, Offset: ");
+      Serial.print(windowOffsetSemitones);
+      Serial.println("st");
+      lastDebugPrint = millis();
+    }
+    
+    // Only apply pitch window if tilt exceeds deadzone
+    if (abs(deviation) > WINDOW_DEADZONE) {
+      // Map tilt to semitone offset (NOT scale degrees)
+      accelPositionOffset = deviation * WINDOW_SENSITIVITY;
       
-      // Use fine sensitivity for pinky-controlled pitch window
-      float sensitivity = FINE_SENSITIVITY;
+      // Constrain to ±MAX_WINDOW_OFFSET_SEMITONES (consistent across all scales)
+      int newWindowOffsetSemitones = (int)round(accelPositionOffset);
+      newWindowOffsetSemitones = constrain(newWindowOffsetSemitones, -MAX_WINDOW_OFFSET_SEMITONES, MAX_WINDOW_OFFSET_SEMITONES);
       
-      // Integrate velocity to position
-      accelPositionOffset += velocity * sensitivity * deltaT;
-      
-      // Update window offset (convert to integer semitones)
-      int newWindowOffset = (int)round(accelPositionOffset);
-      newWindowOffset = constrain(newWindowOffset, -MAX_WINDOW_OFFSET, MAX_WINDOW_OFFSET);
-      
-      // Only update if changed
-      if (newWindowOffset != windowOffset) {
-        windowOffset = newWindowOffset;
-        updateScaleNotes();
+      // If window position changed, update active notes in real-time
+      if (newWindowOffsetSemitones != windowOffsetSemitones) {
+        int oldOffsetSemitones = windowOffsetSemitones;
+        windowOffsetSemitones = newWindowOffsetSemitones;
+        
+        // Calculate nearest scale degree (for display and snapping)
+        windowOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+        
+        Serial.print("[WINDOW CHANGED] ");
+        Serial.print(oldOffsetSemitones);
+        Serial.print("st -> ");
+        Serial.print(windowOffsetSemitones);
+        Serial.println("st");
+        
+        // Slide pitches of held notes with the window
+        if (anyNoteActive) {
+          for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+            if (leftButtonStates[i] && envelopes[i].isActive) {
+              int offsetToApply = windowOffsetSemitones;
+              // For non-chromatic scales, snap to scale degrees
+              if (currentScale != SCALE_CHROMATIC) {
+                int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+                offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
+              }
+              int bentNote = currentScaleNotes[i] + offsetToApply;
+              float freq = mtof(bentNote);
+              oscSine[i].SetFreq(freq);
+              oscTri[i].SetFreq(freq);
+            }
+          }
+        }
         
         // Print window info
         Serial.print("[PITCH WINDOW] ");
@@ -938,6 +1098,8 @@ void loop() {
     lastAccelX = accelX;
     lastAccelRead = millis();
   }
+  // NOTE: Window offset persists when pinky is released - it only resets on calibration or explicit action
+  // This allows the pitch to "stick" at the final tilt position
 
   delay(1);
 }
