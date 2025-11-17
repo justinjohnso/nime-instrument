@@ -122,13 +122,9 @@ nime-midi-controller/
 │   ├── README.md             # Documentation index
 │   ├── reference/
 │   │   └── CONTROL_REFERENCE.md  # Visual control reference
-│   ├── technical/
-│   │   └── ARCHITECTURE_OVERVIEW.md  # Technical architecture
-│   └── archive/              # Temporary docs (in .gitignore)
-│       ├── blog/
-│       │   └── 2025-09-29-nime-instrument-update.md
-│       ├── CHEAT_SHEET.md
-│       └── CODE_REVIEW_SUMMARY.md
+│   └── technical/
+│       ├── ARCHITECTURE_OVERVIEW.md  # System architecture & design
+│       └── IMPLEMENTATION_PLAN.md    # Feature roadmap
 ├── platformio.ini            # PlatformIO configuration
 ├── README.md                 # This file
 └── include/                  # Header files (if any)
