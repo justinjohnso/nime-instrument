@@ -108,7 +108,7 @@ bool isCalibrating = false;
 // Left Hand Buttons (Note Articulation)
 const int NUM_LEFT_BUTTONS = 5;
 Switch leftButton[NUM_LEFT_BUTTONS];
-const int leftButtonPins[NUM_LEFT_BUTTONS] = {8, 9, 10, 13, 14};  // D8-D12 (skip D11)
+const int leftButtonPins[NUM_LEFT_BUTTONS] = {6, 7, 8, 9, 10};
 bool leftButtonStates[NUM_LEFT_BUTTONS] = {false};      // Logical note states (can be latched)
 bool leftButtonPrevStates[NUM_LEFT_BUTTONS] = {false};  // Previous physical button states
 
