@@ -32,8 +32,10 @@ Oscillator oscSine[5];  // Sine oscillators for each button
 Oscillator oscTri[5];   // Triangle oscillators for each button
 
 // Envelope System
-const float ATTACK_TIME = 0.02f;   // 20ms attack to eliminate clicks
+const float ATTACK_TIME = 0.05f;   // 50ms attack for gentler onset (prevents clipping)
 const float RELEASE_TIME = 0.15f;  // 150ms release for smooth fade
+const float ATTACK_TIME_ARP = 0.01f;   // 10ms attack for arpeggio (fast, minimal click)
+const float RELEASE_TIME_ARP = 0.03f;  // 30ms release for arpeggio (quick cutoff)
 struct NoteEnvelope {
   float level;              // Current envelope amplitude (0.0 to 1.0)
   bool isActive;            // Note is playing
@@ -196,11 +198,12 @@ void i2cScan() {
 // Play Modes
 enum PlayMode {
   MODE_SINGLE_NOTE = 0,     // Individual note per button
-  MODE_MAJOR_CHORD = 1,     // Root + Major 3rd + Perfect 5th
-  MODE_MINOR_CHORD = 2      // Root + Minor 3rd + Perfect 5th
+  MODE_CHORD = 1,           // Triad chords (major/minor determined by scale)
+  MODE_ARPEGGIO = 2         // Auto-cycle through triad notes when button held
 };
 int currentMode = MODE_SINGLE_NOTE;
 bool latchMode = false;             // When true, buttons latch notes ON
+bool suboctaveEnabled = false;      // When true, add lower octave doubling for thicker sound
 
 // Chord voicing intervals (semitones from root)
 const int majorChordIntervals[3] = {0, 4, 7};     // Root, Major 3rd, Perfect 5th
@@ -216,8 +219,44 @@ struct ChordVoice {
 ChordVoice chordVoices[5 * CHORD_NOTES_PER_VOICE];  // Max 5 buttons × 3 notes each
 int numActiveChordVoices = 0;
 
-// Forward declaration
+// Arpeggio state (for MODE_ARPEGGIO)
+unsigned long lastArpStepTime = 0;
+const unsigned long ARP_INTERVAL_MS = 175;  // Time between arpeggio notes (ms) - adjust by ear
+int currentArpNoteIndex = 0;                // Which note in the triad (0=root, 1=3rd, 2=5th)
+int currentArpButton = -1;                  // Which button is currently arpeggiated (-1 = none)
+
+// Forward declarations
 void releaseNote(int noteIndex);
+int scaleDegreesToSemitones(int degrees);
+int semitoneOffsetToNearestScaleDegree(int semitoneOffset);
+
+/**
+ * Window shifting helper functions
+ * C2 to C5 range = MIDI 36 to 72 = 36 semitone range
+ */
+int clampWindowSemitones(int semitones) {
+  return constrain(semitones, -MAX_WINDOW_OFFSET_SEMITONES, MAX_WINDOW_OFFSET_SEMITONES);
+}
+
+void setWindowByDegrees(int degrees) {
+  windowOffsetDegrees = degrees;
+  windowOffsetSemitones = clampWindowSemitones(scaleDegreesToSemitones(windowOffsetDegrees));
+  Serial.print("Window offset: ");
+  Serial.print(windowOffsetDegrees);
+  Serial.print(" degrees (");
+  Serial.print(windowOffsetSemitones);
+  Serial.println(" semitones)");
+}
+
+void setWindowBySemitones(int semitones) {
+  windowOffsetSemitones = clampWindowSemitones(semitones);
+  windowOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+  Serial.print("Window offset: ");
+  Serial.print(windowOffsetSemitones);
+  Serial.print(" semitones (");
+  Serial.print(windowOffsetDegrees);
+  Serial.println(" degrees)");
+}
 
 void clearAllLatchedNotes() {
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
@@ -359,22 +398,26 @@ float processEnvelope(int noteIndex) {
   
   unsigned long currentTime = millis();
   
+  // Use faster envelopes for arpeggio mode to prevent popping
+  float attackTime = (currentMode == MODE_ARPEGGIO) ? ATTACK_TIME_ARP : ATTACK_TIME;
+  float releaseTime = (currentMode == MODE_ARPEGGIO) ? RELEASE_TIME_ARP : RELEASE_TIME;
+  
   if (env.isReleasing) {
     // Release phase
     float elapsed = (currentTime - env.releaseStartTime) / 1000.0f;
-    if (elapsed >= RELEASE_TIME) {
+    if (elapsed >= releaseTime) {
       env.isActive = false;
       env.level = 0.0f;
       return 0.0f;
     }
-    env.level = 1.0f - (elapsed / RELEASE_TIME);
+    env.level = 1.0f - (elapsed / releaseTime);
   } else {
     // Attack phase
     float elapsed = (currentTime - env.attackStartTime) / 1000.0f;
-    if (elapsed >= ATTACK_TIME) {
+    if (elapsed >= attackTime) {
       env.level = 1.0f;
     } else {
-      env.level = elapsed / ATTACK_TIME;
+      env.level = elapsed / attackTime;
     }
   }
   
@@ -406,12 +449,20 @@ void releaseNote(int noteIndex) {
 /**
  * Apply pitch offset (sharp/flat) to all currently playing notes
  * Used for momentary pitch bend via right hand buttons
+ * Applies to the CURRENT notes (including window offset)
  */
 void applyPitchOffset() {
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
     if (leftButtonStates[i]) {
-      // Note is playing, shift its frequency
-      int shiftedNote = currentScaleNotes[i] + pitchOffset;
+      // Calculate base note with window offset
+      int offsetToApply = windowOffsetSemitones;
+      if (currentScale != SCALE_CHROMATIC) {
+        int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+        offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
+      }
+      
+      // Apply both window offset AND pitch offset to currently playing note
+      int shiftedNote = currentScaleNotes[i] + offsetToApply + pitchOffset;
       float freq = mtof(shiftedNote);
       oscSine[i].SetFreq(freq);
       oscTri[i].SetFreq(freq);
@@ -483,7 +534,7 @@ void triggerChord(int buttonIndex, bool isMajor) {
  * Release a chord (all voices for a button)
  */
 void releaseChord(int buttonIndex) {
-  if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
+  if (currentMode == MODE_CHORD) {
     // Release all chord notes associated with this button
     for (int i = 0; i < MAX_CHORD_NOTES; i++) {
       if (chordNotes[i].isActive && chordNotes[i].sineOscIdx == buttonIndex) {
@@ -507,7 +558,7 @@ void releaseChord(int buttonIndex) {
 /**
  * Process distance sensor with mode-aware behavior
  * MODE_SINGLE_NOTE: Distance → distortion/drive (waveform blending + triangle boost)
- * MODE_MAJOR_CHORD/MODE_MINOR_CHORD: Distance → strum speed simulation
+ * MODE_CHORD: Distance → strum speed simulation
  * MODE_LATCH: Distance → filter/vibrato depth control
  */
 void processDistanceSensor() {
@@ -555,7 +606,7 @@ void processDistanceSensor() {
     Serial.print(triBoost, 2);
     Serial.println("x)");
     
-  } else if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
+  } else if (currentMode == MODE_CHORD) {
     // Chord Mode: Distance → Strum/Arpeggiator Speed
     // Note: Full arpeggiator implementation requires envelope retrigger system
     // For now, we store the strum speed parameter for future use
@@ -684,14 +735,18 @@ void setup() {
   delay(200);  // Sensor stabilization
   
   // Initialize MSA311 (address 0x62) on I2C1
-  Serial.println("Initializing MSA311 accelerometer (0x62) on I2C1...");
-  if (accel.begin(0x62, &Wire)) {
-    Serial.println("✓ MSA311 OK - IMU features enabled");
-    accelAvailable = true;
-  } else {
-    Serial.println("✗ MSA311 initialization failed");
-    accelAvailable = false;
-  }
+  // DISABLED for v0.5: Using button-based window control instead of IMU
+  Serial.println("MSA311 accelerometer DISABLED (using button-based window control)");
+  accelAvailable = false;
+  
+  // Uncomment below to re-enable IMU in future version:
+  // if (accel.begin(0x62, &Wire)) {
+  //   Serial.println("✓ MSA311 OK - IMU features enabled");
+  //   accelAvailable = true;
+  // } else {
+  //   Serial.println("✗ MSA311 initialization failed");
+  //   accelAvailable = false;
+  // }
   
   delay(150);
   
@@ -719,139 +774,183 @@ void setup() {
   Serial.println("Current key: C, Octave: 4, Scale: Major Pentatonic");
 }
 
+/**
+ * Update arpeggiator - cycles through triad notes when button held in MODE_ARPEGGIO
+ */
+void updateArpeggiator() {
+  if (currentMode != MODE_ARPEGGIO) return;
+  
+  unsigned long now = millis();
+  if (now - lastArpStepTime < ARP_INTERVAL_MS) return;
+  lastArpStepTime = now;
+  
+  // Find which button is currently held
+  int heldButton = -1;
+  for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
+    if (leftButtonStates[i]) {
+      heldButton = i;
+      break;  // Just use first held button for now
+    }
+  }
+  
+  if (heldButton == -1) {
+    // No button held, silence current note
+    if (currentArpButton >= 0) {
+      releaseNote(currentArpButton);
+      currentArpButton = -1;
+    }
+    return;
+  }
+  
+  // Build triad for current button (major/minor based on scale)
+  bool isMajor = (currentScale != SCALE_MINOR_PENTATONIC);
+  const int* intervals = isMajor ? majorChordIntervals : minorChordIntervals;
+  
+  int offsetToApply = windowOffsetSemitones;
+  if (currentScale != SCALE_CHROMATIC) {
+    int snapped = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+    offsetToApply = scaleDegreesToSemitones(snapped);
+  }
+  
+  int rootNote = currentScaleNotes[heldButton] + offsetToApply + pitchOffset;
+  int triadNotes[3] = {
+    rootNote,                    // Root
+    rootNote + intervals[1],     // 3rd
+    rootNote + intervals[2]      // 5th
+  };
+  
+  // Ensure previous note is fully released before triggering next
+  if (currentArpButton >= 0 && currentArpButton != heldButton) {
+    releaseNote(currentArpButton);
+  }
+  
+  // Play current note in sequence
+  int noteToPlay = triadNotes[currentArpNoteIndex];
+  float freq = mtof(noteToPlay);
+  
+  oscSine[heldButton].SetFreq(freq);
+  oscTri[heldButton].SetFreq(freq);
+  oscSine[heldButton].Reset();
+  oscTri[heldButton].Reset();
+  triggerNote(heldButton);
+  
+  currentArpButton = heldButton;
+  
+  // Advance to next note in triad
+  currentArpNoteIndex = (currentArpNoteIndex + 1) % 3;
+  
+  Serial.print("Arp: Note ");
+  Serial.println(noteToPlay);
+}
+
 void handleRightHand() {
-  // check for combinations
+  // Check for combinations
   bool thumbPressed = rightButtonStates[RIGHT_THUMB];
   bool indexPressed = rightButtonStates[RIGHT_INDEX];
   bool middlePressed = rightButtonStates[RIGHT_MIDDLE];
   bool ringPressed = rightButtonStates[RIGHT_RING];
   bool pinkyPressed = rightButtonStates[RIGHT_PINKY];
   
-  // Debug: Log button combinations
-  static bool lastState[5] = {false};
-  if (indexPressed != lastState[RIGHT_INDEX] || pinkyPressed != lastState[RIGHT_PINKY] || thumbPressed != lastState[RIGHT_THUMB]) {
-    Serial.print("[BUTTONS] Thumb:");
-    Serial.print(thumbPressed ? "1" : "0");
-    Serial.print(" Index:");
-    Serial.print(indexPressed ? "1" : "0");
-    Serial.print(" Middle:");
-    Serial.print(middlePressed ? "1" : "0");
-    Serial.print(" Ring:");
-    Serial.print(ringPressed ? "1" : "0");
-    Serial.print(" Pinky:");
-    Serial.println(pinkyPressed ? "1" : "0");
-    for (int i = 0; i < 5; i++) lastState[i] = rightButtonStates[i];
-  }
-
-  // Handle momentary sharp/flat (when thumb NOT pressed)
+  // Detect rising edges (just pressed)
+  bool thumbRising = thumbPressed && !rightButtonPrevStates[RIGHT_THUMB];
+  bool indexRising = indexPressed && !rightButtonPrevStates[RIGHT_INDEX];
+  bool middleRising = middlePressed && !rightButtonPrevStates[RIGHT_MIDDLE];
+  bool ringRising = ringPressed && !rightButtonPrevStates[RIGHT_RING];
+  bool pinkyRising = pinkyPressed && !rightButtonPrevStates[RIGHT_PINKY];
+  
+  // NO THUMB PRESSED (Window control & momentary effects)
   if (!thumbPressed) {
-    // Momentary sharp (middle finger)
-    if (middlePressed && !rightButtonPrevStates[RIGHT_MIDDLE]) {
-      pitchOffset = 1;
-      applyPitchOffset();
-      Serial.println("Momentary Sharp (#): +1 semitone to playing notes");
-    } else if (!middlePressed && rightButtonPrevStates[RIGHT_MIDDLE]) {
-      pitchOffset = 0;
-      applyPitchOffset();
-      Serial.println("Sharp Released: back to normal pitch");
+    // MIDDLE + RING: Cycle through performance modes
+    if (middlePressed && ringPressed && (middleRising || ringRising)) {
+      // Cycle: Single Note → Chord → Arpeggio → loop
+      switch (currentMode) {
+        case MODE_SINGLE_NOTE:
+          currentMode = MODE_CHORD;
+          Serial.print("Mode: Chord (");
+          Serial.print(currentScale == SCALE_MINOR_PENTATONIC ? "Minor" : "Major");
+          Serial.println(")");
+          break;
+        case MODE_CHORD:
+          currentMode = MODE_ARPEGGIO;
+          Serial.println("Mode: Arpeggio");
+          break;
+        case MODE_ARPEGGIO:
+          currentMode = MODE_SINGLE_NOTE;
+          clearAllLatchedNotes();
+          Serial.println("Mode: Single Note");
+          break;
+      }
     }
-    
-    // Momentary flat (ring finger)
-    if (ringPressed && !rightButtonPrevStates[RIGHT_RING]) {
-      pitchOffset = -1;
-      applyPitchOffset();
-      Serial.println("Momentary Flat (♭): -1 semitone to playing notes");
-    } else if (!ringPressed && rightButtonPrevStates[RIGHT_RING]) {
-      pitchOffset = 0;
-      applyPitchOffset();
-      Serial.println("Flat Released: back to normal pitch");
+    // Single button actions (if no combos using middle or ring)
+    else if (!middlePressed || !ringPressed) {
+      // PINKY: Window DOWN 1 scale degree
+      if (pinkyRising) {
+        setWindowByDegrees(windowOffsetDegrees - 1);
+      }
+      // INDEX: Window UP 1 scale degree  
+      if (indexRising) {
+        setWindowByDegrees(windowOffsetDegrees + 1);
+      }
+      
+      // MIDDLE: Momentary sharp (hold)
+      if (middlePressed && !rightButtonPrevStates[RIGHT_MIDDLE]) {
+        pitchOffset = 1;
+        applyPitchOffset();
+        Serial.println("Momentary Sharp (#): +1 semitone");
+      } else if (!middlePressed && rightButtonPrevStates[RIGHT_MIDDLE]) {
+        pitchOffset = 0;
+        applyPitchOffset();
+        Serial.println("Sharp Released");
+      }
+      
+      // RING: Momentary flat (hold)
+      if (ringPressed && !rightButtonPrevStates[RIGHT_RING]) {
+        pitchOffset = -1;
+        applyPitchOffset();
+        Serial.println("Momentary Flat (♭): -1 semitone");
+      } else if (!ringPressed && rightButtonPrevStates[RIGHT_RING]) {
+        pitchOffset = 0;
+        applyPitchOffset();
+        Serial.println("Flat Released");
+      }
     }
   }
-
-  // thumb ("shift" button)
-  if (thumbPressed) {
-    // change scale
-    if (indexPressed && !rightButtonPrevStates[RIGHT_INDEX]) {
-      currentScale = SCALE_MAJOR_PENTATONIC;
-      updateScaleNotes();
-      Serial.println("Scale: Major Pentatonic");
+  // THUMB HELD (Mode switches & octave window shifts)
+  else {
+    // Single button actions with thumb (check these first to avoid conflicts)
+    // THUMB + PINKY: Window DOWN 1 octave
+    if (pinkyRising && !indexPressed && !middlePressed && !ringPressed) {
+      setWindowBySemitones(windowOffsetSemitones - 12);
     }
-    if (middlePressed && !rightButtonPrevStates[RIGHT_MIDDLE]) {
-      currentScale = SCALE_MINOR_PENTATONIC;
-      updateScaleNotes();
-      Serial.println("Scale: Minor Pentatonic");
+    // THUMB + INDEX: Window UP 1 octave
+    else if (indexRising && !pinkyPressed && !middlePressed && !ringPressed) {
+      setWindowBySemitones(windowOffsetSemitones + 12);
     }
-    if (ringPressed && !rightButtonPrevStates[RIGHT_RING]) {
-      currentScale = SCALE_CHROMATIC;
-      updateScaleNotes();
-      Serial.println("Scale: Chromatic");
-    }
-    // latch
-    if (pinkyPressed && !rightButtonPrevStates[RIGHT_PINKY]) {
+    // THUMB + MIDDLE: Toggle latch mode
+    else if (middleRising && !indexPressed && !pinkyPressed && !ringPressed) {
       latchMode = !latchMode;
       Serial.print("Latch Mode: ");
       Serial.println(latchMode ? "ON" : "OFF");
-      // When turning OFF latch mode, clear all latched notes
       if (!latchMode) {
         clearAllLatchedNotes();
       }
     }
-    // change chord
-    else if (indexPressed && middlePressed) {
-      if (currentMode != MODE_MAJOR_CHORD) {
-        currentMode = MODE_MAJOR_CHORD;
-        Serial.println("Mode: Major Chord");
+    // THUMB + RING: Cycle through scales (Major Pent -> Minor Pent -> Chromatic -> loop)
+    else if (ringRising && !indexPressed && !middlePressed && !pinkyPressed) {
+      // Cycle to next scale
+      currentScale = (currentScale + 1) % 3;  // 0, 1, 2, then back to 0
+      updateScaleNotes();
+      switch (currentScale) {
+        case SCALE_MAJOR_PENTATONIC:
+          Serial.println("Scale: Major Pentatonic");
+          break;
+        case SCALE_MINOR_PENTATONIC:
+          Serial.println("Scale: Minor Pentatonic");
+          break;
+        case SCALE_CHROMATIC:
+          Serial.println("Scale: Chromatic");
+          break;
       }
-    } 
-    else if (indexPressed && ringPressed) {
-      if (currentMode != MODE_MINOR_CHORD) {
-        currentMode = MODE_MINOR_CHORD;
-        Serial.println("Mode: Minor Chord");
-      }
-    } 
-    // change key
-    else if (middlePressed && ringPressed) {
-      // key set mode – handled in left hand
-      Serial.println("Key Set Mode – Use left hand to select key");
-    }
-  }
-  // single button actions (IMU calibration and other controls)
-  else {
-    // Check for calibration gesture (both index + pinky held together)
-    // Calibrates IMU center position for pitch bend zero-point
-    if (indexPressed && pinkyPressed) {
-      if (!isCalibrating && calibrationStartTime == 0) {
-        calibrationStartTime = millis();
-        Serial.println("Hold for 2s to calibrate IMU center position...");
-      } else if (millis() - calibrationStartTime >= CALIBRATION_HOLD_TIME) {
-        // Calibrate IMU!
-        if (accelAvailable) {
-          accel.read();
-          accelCenterX = accel.x;
-          accelCenterZ = accel.z;
-          accelPositionOffset = 0.0f;  // Reset pitch window offset after calibration
-          Serial.println("=== IMU CALIBRATED ===");
-          Serial.print("Center X: ");
-          Serial.print(accelCenterX, 2);
-          Serial.print("G, Center Z: ");
-          Serial.print(accelCenterZ, 2);
-          Serial.println("G");
-        }
-        isCalibrating = false;
-        calibrationStartTime = 0;
-      }
-    } else {
-      // Reset calibration timer if buttons released
-      if (calibrationStartTime != 0 && !isCalibrating) {
-        Serial.println("Calibration cancelled");
-      }
-      calibrationStartTime = 0;
-      isCalibrating = false;
-    }
-    // reset to single note (no combos pressed)
-    if (!indexPressed && !middlePressed && !ringPressed && currentMode != MODE_SINGLE_NOTE) {
-      currentMode = MODE_SINGLE_NOTE;
-      Serial.println("Mode: Single Note");
     }
   }
   
@@ -863,8 +962,6 @@ void handleRightHand() {
 };
 
 void handleLeftHand() {
-  bool keySetMode = rightButtonStates[RIGHT_MIDDLE] && rightButtonStates[RIGHT_RING];
-
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
     leftButton[i].Debounce();
 
@@ -873,26 +970,33 @@ void handleLeftHand() {
     bool rising      =  pressed && !wasPressed;        // just pressed
     bool falling     = !pressed &&  wasPressed;        // just released
 
-    if (keySetMode) {
-      // Change key on press only
-      if (rising) {
-        int newKey = (i * 2) % 12; // simple mapping, tweak as desired
-        currentKey = newKey;
-        updateScaleNotes();
-        Serial.print("New Key: ");
-        Serial.println(currentKey);
-      }
-    } else if (currentMode == MODE_MAJOR_CHORD || currentMode == MODE_MINOR_CHORD) {
-      // Chord mode: press triggers chord
+    if (currentMode == MODE_CHORD) {
+      // Chord mode: press triggers chord (major/minor based on scale)
       if (rising) {
         leftButtonStates[i] = true;
-        bool isMajor = (currentMode == MODE_MAJOR_CHORD);
+        bool isMajor = (currentScale != SCALE_MINOR_PENTATONIC);  // Minor pent = minor chords, else major
         triggerChord(i, isMajor);
       }
       if (falling) {
         leftButtonStates[i] = false;
         releaseChord(i);
         Serial.print("Chord OFF - Button ");
+        Serial.println(i + 1);
+      }
+    } else if (currentMode == MODE_ARPEGGIO) {
+      // Arpeggio mode: button press just sets state, arpeggiator handles notes
+      if (rising) {
+        leftButtonStates[i] = true;
+        Serial.print("Arp button ON: ");
+        Serial.println(i + 1);
+      }
+      if (falling) {
+        leftButtonStates[i] = false;
+        if (currentArpButton == i) {
+          releaseNote(i);
+          currentArpButton = -1;
+        }
+        Serial.print("Arp button OFF: ");
         Serial.println(i + 1);
       }
     } else if (latchMode) {
@@ -978,6 +1082,9 @@ void handleLeftHand() {
 };
 
 void loop() {
+  // Update arpeggiator (if in arpeggio mode)
+  updateArpeggiator();
+  
   // volume
   int volumeRaw = analogRead(VOLUME_PIN);
   
