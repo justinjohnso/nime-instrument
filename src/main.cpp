@@ -50,6 +50,7 @@ struct ChordNote {
   int midiNote;             // MIDI note to play
   int sineOscIdx;           // Which sine oscillator (0-4)
   int triOscIdx;            // Which tri oscillator (0-4)
+  int buttonIndex;          // Which left-hand button triggered this chord (for release matching)
   bool isActive;            // Currently playing
 };
 const int MAX_CHORD_NOTES = 15;  // 5 buttons × 3 notes each
@@ -483,7 +484,7 @@ void triggerChord(int buttonIndex, bool isMajor) {
   
   // Clear any previous chord tones from this button
   for (int i = 0; i < MAX_CHORD_NOTES; i++) {
-    if (chordNotes[i].isActive && chordNotes[i].sineOscIdx == buttonIndex) {
+    if (chordNotes[i].isActive && chordNotes[i].buttonIndex == buttonIndex) {
       chordNotes[i].isActive = false;
     }
   }
@@ -504,6 +505,7 @@ void triggerChord(int buttonIndex, bool isMajor) {
       cn.midiNote = chordNotesArray[noteIdx];
       cn.sineOscIdx = (oscOffset + noteIdx) % NUM_LEFT_BUTTONS;
       cn.triOscIdx = (oscOffset + noteIdx) % NUM_LEFT_BUTTONS;
+      cn.buttonIndex = buttonIndex;
       cn.isActive = true;
       
       // Set frequency immediately
@@ -537,7 +539,7 @@ void releaseChord(int buttonIndex) {
   if (currentMode == MODE_CHORD) {
     // Release all chord notes associated with this button
     for (int i = 0; i < MAX_CHORD_NOTES; i++) {
-      if (chordNotes[i].isActive && chordNotes[i].sineOscIdx == buttonIndex) {
+      if (chordNotes[i].isActive && chordNotes[i].buttonIndex == buttonIndex) {
         releaseNote(chordNotes[i].sineOscIdx);
         chordNotes[i].isActive = false;
       }
