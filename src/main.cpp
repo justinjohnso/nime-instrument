@@ -482,8 +482,15 @@ void applyPitchOffset() {
 void triggerChord(int buttonIndex, bool isMajor) {
   if (buttonIndex < 0 || buttonIndex >= NUM_LEFT_BUTTONS) return;
   
+  // Apply window offset like single note mode does
+  int offsetToApply = windowOffsetSemitones;
+  if (currentScale != SCALE_CHROMATIC) {
+    int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
+    offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
+  }
+  
   const int* intervals = isMajor ? majorChordIntervals : minorChordIntervals;
-  int rootNote = currentScaleNotes[buttonIndex] + pitchOffset;
+  int rootNote = currentScaleNotes[buttonIndex] + offsetToApply + pitchOffset;
   
   // Clear any previous chord tones from this button
   for (int i = 0; i < MAX_CHORD_NOTES; i++) {
