@@ -115,6 +115,9 @@ const int leftButtonPins[NUM_LEFT_BUTTONS] = {6, 7, 8, 9, 10};
 bool leftButtonStates[NUM_LEFT_BUTTONS] = {false};      // Logical note states (can be latched)
 bool leftButtonPrevStates[NUM_LEFT_BUTTONS] = {false};  // Previous physical button states
 
+// Oscillator ref counting to prevent envelope conflicts from button overlaps
+int oscRefCount[NUM_LEFT_BUTTONS] = {0};  // Track how many notes are using each oscillator
+
 ///////////////
 // Right hand
 ///////////////
@@ -512,7 +515,12 @@ void triggerChord(int buttonIndex, bool isMajor) {
       float freq = mtof(cn.midiNote);
       oscSine[cn.sineOscIdx].SetFreq(freq);
       oscTri[cn.triOscIdx].SetFreq(freq);
-      triggerNote(cn.sineOscIdx);
+      
+      // Only trigger if this oscillator hasn't been triggered yet in this chord
+      if (oscRefCount[cn.sineOscIdx] == 0) {
+        triggerNote(cn.sineOscIdx);
+      }
+      oscRefCount[cn.sineOscIdx]++;
       
       numActiveChordNotes++;
     }
@@ -540,7 +548,12 @@ void releaseChord(int buttonIndex) {
     // Release all chord notes associated with this button
     for (int i = 0; i < MAX_CHORD_NOTES; i++) {
       if (chordNotes[i].isActive && chordNotes[i].buttonIndex == buttonIndex) {
-        releaseNote(chordNotes[i].sineOscIdx);
+        int oscIdx = chordNotes[i].sineOscIdx;
+        oscRefCount[oscIdx]--;
+        // Only release the oscillator if no other notes are using it
+        if (oscRefCount[oscIdx] == 0) {
+          releaseNote(oscIdx);
+        }
         chordNotes[i].isActive = false;
       }
     }
