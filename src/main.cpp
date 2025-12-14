@@ -573,6 +573,10 @@ void releaseChord(int buttonIndex) {
         chordNotes[writeIdx++] = chordNotes[i];
       }
     }
+    // Zero out the tail to prevent stale entries from being re-triggered
+    for (int i = writeIdx; i < MAX_CHORD_NOTES; i++) {
+      chordNotes[i].isActive = false;
+    }
     numActiveChordNotes = writeIdx;
   }
 }
@@ -721,6 +725,12 @@ void setup() {
     envelopes[i].isActive = false;
     envelopes[i].isReleasing = false;
   }
+  
+  // Initialize chord note array
+  for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+    chordNotes[i].isActive = false;
+  }
+  numActiveChordNotes = 0;
 
   DAISY.begin(AudioCallback); // start audio processing
   pinMode(VOLUME_PIN, INPUT); // volume pot
