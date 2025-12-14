@@ -93,7 +93,8 @@ bool tofAvailable = false;
 const int WINDOW_SIZE = 5;                    // Number of notes in window
 int windowOffsetSemitones = 0;                // Current offset in SEMITONES (not scale degrees)
 int windowOffsetDegrees = 0;                  // Display/UI only: nearest scale degree to current offset
-const int MAX_WINDOW_OFFSET_SEMITONES = 36;  // ±36 semitones max (3 octaves, consistent across all scales)
+const int MAX_WINDOW_OFFSET_DOWN = 36;        // -36 semitones (3 octaves down to C0)
+const int MAX_WINDOW_OFFSET_UP = 24;          // +24 semitones (2 octaves up, capped for brightness)
 float accelPositionOffset = 0.0f;             // Integrated position from center
 float lastAccelX = 0.0f;                      // Previous X acceleration
 float smoothedAccelX = 0.0f;                  // Low-pass filtered accelX
@@ -236,10 +237,10 @@ int semitoneOffsetToNearestScaleDegree(int semitoneOffset);
 
 /**
  * Window shifting helper functions
- * C2 to C5 range = MIDI 36 to 72 = 36 semitone range
+ * Range: C0 (down) to A5 (up)
  */
 int clampWindowSemitones(int semitones) {
-  return constrain(semitones, -MAX_WINDOW_OFFSET_SEMITONES, MAX_WINDOW_OFFSET_SEMITONES);
+  return constrain(semitones, -MAX_WINDOW_OFFSET_DOWN, MAX_WINDOW_OFFSET_UP);
 }
 
 void setWindowByDegrees(int degrees) {
@@ -349,7 +350,8 @@ int semitoneOffsetToNearestScaleDegree(int semitoneOffset) {
   int bestDistance = abs(scaleDegreesToSemitones(0) - targetSemitones);
   
   // Search all possible degrees (no early break - octave wrapping creates non-monotonic distance)
-  for (int d = 1; d <= MAX_WINDOW_OFFSET_SEMITONES; d++) {
+  int maxSearchSemitones = (semitoneOffset > 0) ? MAX_WINDOW_OFFSET_UP : MAX_WINDOW_OFFSET_DOWN;
+  for (int d = 1; d <= maxSearchSemitones; d++) {
     int semitones = abs(scaleDegreesToSemitones(d));
     int distance = abs(semitones - targetSemitones);
     
@@ -1125,9 +1127,9 @@ void loop() {
       // Map tilt to semitone offset (NOT scale degrees)
       accelPositionOffset = deviation * WINDOW_SENSITIVITY;
       
-      // Constrain to ±MAX_WINDOW_OFFSET_SEMITONES (consistent across all scales)
+      // Constrain to window bounds (asymmetric: -36 to +24 semitones)
       int newWindowOffsetSemitones = (int)round(accelPositionOffset);
-      newWindowOffsetSemitones = constrain(newWindowOffsetSemitones, -MAX_WINDOW_OFFSET_SEMITONES, MAX_WINDOW_OFFSET_SEMITONES);
+      newWindowOffsetSemitones = constrain(newWindowOffsetSemitones, -MAX_WINDOW_OFFSET_DOWN, MAX_WINDOW_OFFSET_UP);
       
       // If window position changed, update active notes in real-time
       if (newWindowOffsetSemitones != windowOffsetSemitones) {
