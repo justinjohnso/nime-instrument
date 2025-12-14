@@ -960,13 +960,12 @@ void handleLeftHand() {
 
     if (currentMode == MODE_CHORD) {
       // Chord mode: press triggers chord (major/minor based on scale)
+      // Note: Chords don't latch - they release immediately on button release
       if (rising) {
-        leftButtonStates[i] = true;
         bool isMajor = (currentScale != SCALE_MINOR_PENTATONIC);  // Minor pent = minor chords, else major
         triggerChord(i, isMajor);
       }
       if (falling) {
-        leftButtonStates[i] = false;
         releaseChord(i);
         Serial.print("Chord OFF - Button ");
         Serial.println(i + 1);
