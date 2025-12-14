@@ -143,7 +143,7 @@ nime-midi-controller/
 (Add threads here: oscillator implementation, polyphony, waveform morphing)
 
 ### Phase 3: Input Mapping & Scale Logic
-(Add threads here: note mapping, scales, modes, key selection)
+- [T-019b1e12-7487-70a7-8e55-9349aad7ddf0](https://ampcode.com/threads/T-019b1e12-7487-70a7-8e55-9349aad7ddf0) - Remapped right-hand button combos: disabled latch mode, thumb+middle now cycles scales, thumb+ring cycles play modes
 
 ### Phase 4: Gesture Control & Sensors
 (Add threads here: VL53L0X distance sensor, accelerometer, gesture-to-parameter mapping)

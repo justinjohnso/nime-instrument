@@ -16,11 +16,9 @@
         │   │   │   │   │   │                   │
         │  Play scale degrees in current key    │
         │                                        │
-        │  Normal Mode:     Press = ON, Release = OFF│
-        │  Arpeggio Mode:   Hold = CYCLE TRIAD  │
-        │  Latch Mode:      Press = LATCH & RE-TRIGGER│
-        │  Chord Mode:      Press = PLAY CHORD  │
-        │  Key Set Mode:    Press = SELECT ROOT KEY │
+        │  Single Note:  Press = ON, Release = OFF  │
+        │  Chord Mode:   Press = PLAY CHORD     │
+        │  Arpeggio:     Hold = CYCLE TRIAD     │
         └────────────────────────────────────────┘
 ```
 
@@ -113,10 +111,11 @@
 ╔═══════════════════╦═══════════════════════════════╗
 ║  THUMB + BUTTON   ║         FUNCTION              ║
 ╠═══════════════════╬═══════════════════════════════╣
-║  THUMB + MIDDLE   ║  🔒 TOGGLE LATCH MODE         ║
-║                   ║     (OFF = clear all notes)   ║
-║  THUMB + RING     ║  🔄 CYCLE SCALE               ║
+║  THUMB + MIDDLE   ║  🎵 CYCLE SCALE               ║
 ║                   ║     Major → Minor → Chromatic ║
+║  THUMB + RING     ║  🔄 CYCLE PLAY MODE           ║
+║                   ║     Single → Chord →          ║
+║                   ║     Arpeggio → loop           ║
 ╚═══════════════════╩═══════════════════════════════╝
 ```
 
@@ -165,13 +164,14 @@
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
-│ 🎼 Building Sustained Chords (Latch Mode)                       │
+│ 🎼 Building Chords (Scale-Aware Chord Mode)                     │
 ├──────────────────────────────────────────────────────────────────┤
-│  1. Enable Latch:    THUMB + MIDDLE (tap)                       │
-│  2. Press Notes:     Tap multiple left-hand buttons             │
-│  3. Each Note:       Stays ON until latch disabled              │
-│  4. Re-trigger:      Press latched button again for attack      │
-│  5. Clear All:       THUMB + MIDDLE (toggle off)                │
+│  1. Enable Mode:     THUMB + RING until you reach Chord mode    │
+│  2. Press Buttons:   Play triad chords (root, 3rd, 5th)         │
+│  3. Chord Type:      Follows current scale                      │
+│  4. Multi-Chord:     Press multiple buttons for layers          │
+│  5. Change Type:     THUMB + MIDDLE to change scale             │
+│  6. Exit:            THUMB + RING until back to Single Note     │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
@@ -196,17 +196,17 @@
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
-│ 🎸 Quick Scale Changes                                           │
+│ 🎸 Quick Mode & Scale Changes                                    │
 ├──────────────────────────────────────────────────────────────────┤
-│  Cycle Scale:    THUMB + RING (tap repeatedly to cycle)         │
+│  Cycle Scale:    THUMB + MIDDLE (tap repeatedly to cycle)       │
+│  Cycle Mode:     THUMB + RING (tap repeatedly to cycle)         │
 │  Window Jump:    THUMB + INDEX/PINKY for octave shifts          │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
 │ 🔄 Quick Reset to Defaults                                       │
 ├──────────────────────────────────────────────────────────────────┤
-│  • Turn OFF latch mode → Clears all sustained notes             │
-│  • Turn OFF arpeggio → Returns to normal single-note mode       │
+│  • Return to Single Note mode → Release all notes automatically │
 │  • Release chord buttons → Returns to single-note mode          │
 │  • Move hand FAR → Returns to smooth sine tone (if sensor works)│
 └──────────────────────────────────────────────────────────────────┘
@@ -223,9 +223,7 @@
 ║  Key              ║  C Major                      ║
 ║  Octave           ║  4 (Middle C range)           ║
 ║  Scale            ║  Major Pentatonic             ║
-║  Mode             ║  Single Note                  ║
-║  Latch            ║  OFF                          ║
-║  Arpeggio         ║  OFF                          ║
+║  Play Mode        ║  Single Note                  ║
 ║  Window Offset    ║  0 (no shift)                 ║
 ║  Waveform         ║  Sine (hand far)              ║
 ║  IMU/Accel        ║  DISABLED (v0.5)              ║
@@ -256,12 +254,7 @@
 - Works with window shifting
 - Change chord quality: Just cycle scale (THUMB + RING)
 
-### Latch Mode
-- Toggle: THUMB + MIDDLE
-- Notes stay on after button release
-- Press again to retrigger envelope
-- Can layer multiple notes
-- Turn OFF to clear all
+
 
 ---
 

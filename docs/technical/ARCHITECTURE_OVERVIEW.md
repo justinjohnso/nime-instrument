@@ -174,13 +174,10 @@ SHIFT Released:
 └── Pinky     → Octave Down
 
 SHIFT Held:
-├── Index                → Select Major Pentatonic
-├── Middle               → Select Blues Scale
-├── Ring                 → Select Chromatic Scale
-├── Pinky                → Toggle Latch Mode
-├── Index + Middle       → Major Chord Mode
-├── Index + Ring         → Minor Chord Mode
-└── Middle + Ring        → Key Set Mode
+├── Index                → Window UP 1 octave
+├── Pinky                → Window DOWN 1 octave
+├── Middle               → Cycle Scale (Major→Minor→Chromatic)
+└── Ring                 → Cycle Play Mode (Single→Chord→Arpeggio)
 ```
 
 ### Gesture Control Mapping
@@ -380,10 +377,10 @@ if (sensor.begin()) {
 - **Continuous control:** Smooth expressive parameter
 - **Physical metaphor:** "Squeeze" for brightness feels natural
 
-### Why Latch Mode?
-- **Drone capability:** Sustain notes while playing melody over them
-- **Solo performance:** Build chord/texture, then play over it
-- **Compositional tool:** Set and forget background elements
+### Why Chord & Arpeggio Modes?
+- **Chord mode:** Instantly trigger full harmonic textures
+- **Arpeggio mode:** Real-time rhythmic figures with natural hand gestures
+- **Quick mode switching:** THUMB + RING cycles through modes for live switching
 
 ### Why Momentary Sharp/Flat?
 - **Expressive ornaments:** Blue notes, grace notes, bends

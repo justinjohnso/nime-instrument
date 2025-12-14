@@ -202,7 +202,7 @@ enum PlayMode {
   MODE_ARPEGGIO = 2         // Auto-cycle through triad notes when button held
 };
 int currentMode = MODE_SINGLE_NOTE;
-bool latchMode = false;             // When true, buttons latch notes ON
+// Latch mode disabled - use MODE_CHORD and MODE_ARPEGGIO instead
 bool suboctaveEnabled = false;      // When true, add lower octave doubling for thicker sound
 
 // Chord voicing intervals (semitones from root)
@@ -258,12 +258,12 @@ void setWindowBySemitones(int semitones) {
   Serial.println(" degrees)");
 }
 
-void clearAllLatchedNotes() {
+void clearAllNotes() {
   for (int i = 0; i < NUM_LEFT_BUTTONS; i++) {
     leftButtonStates[i] = false;
     releaseNote(i);  // Trigger envelope release for smooth fade-out
   }
-  Serial.println("All latched notes cleared");
+  Serial.println("All notes cleared");
 }
 
 /**
@@ -620,18 +620,16 @@ void processDistanceSensor() {
     Serial.print(strumSpeed, 2);
     Serial.println(" notes/sec (arpeggiator: reserved)");
     
-  } else if (latchMode) {
-    // Latch Mode: Distance → Filter/Vibrato Depth Control
-    // This would control filter cutoff or vibrato depth
-    // For now, we store the control value for future implementation
+  } else if (currentMode == MODE_ARPEGGIO) {
+    // Arpeggio Mode: Distance → Arpeggiator Speed Control
+    // Map distance to arpeggio tempo
+    float arpSpeed = 0.5f + (palmBlend * 1.5f);
     
-    float filterOrVibratoDepth = palmBlend;
-    
-    Serial.print("Latch Mode - Distance: ");
+    Serial.print("Arpeggio Mode - Distance: ");
     Serial.print(distance);
-    Serial.print(" mm -> Filter/Vibrato Depth: ");
-    Serial.print(filterOrVibratoDepth * 100, 0);
-    Serial.println("% (filter/vibrato: reserved)");
+    Serial.print(" mm -> Tempo: ");
+    Serial.print(arpSpeed, 2);
+    Serial.println(" notes/sec");
   }
   
   lastDistance = distance;
@@ -860,29 +858,8 @@ void handleRightHand() {
   
   // NO THUMB PRESSED (Window control & momentary effects)
   if (!thumbPressed) {
-    // MIDDLE + RING: Cycle through performance modes
-    if (middlePressed && ringPressed && (middleRising || ringRising)) {
-      // Cycle: Single Note → Chord → Arpeggio → loop
-      switch (currentMode) {
-        case MODE_SINGLE_NOTE:
-          currentMode = MODE_CHORD;
-          Serial.print("Mode: Chord (");
-          Serial.print(currentScale == SCALE_MINOR_PENTATONIC ? "Minor" : "Major");
-          Serial.println(")");
-          break;
-        case MODE_CHORD:
-          currentMode = MODE_ARPEGGIO;
-          Serial.println("Mode: Arpeggio");
-          break;
-        case MODE_ARPEGGIO:
-          currentMode = MODE_SINGLE_NOTE;
-          clearAllLatchedNotes();
-          Serial.println("Mode: Single Note");
-          break;
-      }
-    }
-    // Single button actions (if no combos using middle or ring)
-    else if (!middlePressed || !ringPressed) {
+    // Single button actions
+    {
       // PINKY: Window DOWN 1 scale degree
       if (pinkyRising) {
         setWindowByDegrees(windowOffsetDegrees - 1);
@@ -926,17 +903,8 @@ void handleRightHand() {
     else if (indexRising && !pinkyPressed && !middlePressed && !ringPressed) {
       setWindowBySemitones(windowOffsetSemitones + 12);
     }
-    // THUMB + MIDDLE: Toggle latch mode
+    // THUMB + MIDDLE: Cycle through scales (Major Pent -> Minor Pent -> Chromatic -> loop)
     else if (middleRising && !indexPressed && !pinkyPressed && !ringPressed) {
-      latchMode = !latchMode;
-      Serial.print("Latch Mode: ");
-      Serial.println(latchMode ? "ON" : "OFF");
-      if (!latchMode) {
-        clearAllLatchedNotes();
-      }
-    }
-    // THUMB + RING: Cycle through scales (Major Pent -> Minor Pent -> Chromatic -> loop)
-    else if (ringRising && !indexPressed && !middlePressed && !pinkyPressed) {
       // Cycle to next scale
       currentScale = (currentScale + 1) % 3;  // 0, 1, 2, then back to 0
       updateScaleNotes();
@@ -949,6 +917,26 @@ void handleRightHand() {
           break;
         case SCALE_CHROMATIC:
           Serial.println("Scale: Chromatic");
+          break;
+      }
+    }
+    // THUMB + RING: Cycle through play modes (Single Note -> Chord -> Arpeggio -> loop)
+    else if (ringRising && !indexPressed && !middlePressed && !pinkyPressed) {
+      switch (currentMode) {
+        case MODE_SINGLE_NOTE:
+          currentMode = MODE_CHORD;
+          Serial.print("Mode: Chord (");
+          Serial.print(currentScale == SCALE_MINOR_PENTATONIC ? "Minor" : "Major");
+          Serial.println(")");
+          break;
+        case MODE_CHORD:
+          currentMode = MODE_ARPEGGIO;
+          Serial.println("Mode: Arpeggio");
+          break;
+        case MODE_ARPEGGIO:
+          currentMode = MODE_SINGLE_NOTE;
+          clearAllNotes();
+          Serial.println("Mode: Single Note");
           break;
       }
     }
@@ -999,50 +987,6 @@ void handleLeftHand() {
         Serial.print("Arp button OFF: ");
         Serial.println(i + 1);
       }
-    } else if (latchMode) {
-      // Latch mode: press latches note ON, press again re-triggers
-      if (rising) {
-        if (!leftButtonStates[i]) {
-          // Note was off, latch it on
-          leftButtonStates[i] = true;
-          int offsetToApply = windowOffsetSemitones;
-          // For non-chromatic scales, snap to scale degrees
-          if (currentScale != SCALE_CHROMATIC) {
-            int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
-            offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
-          }
-          int note = currentScaleNotes[i] + offsetToApply;
-          float freq = mtof(note);
-          oscSine[i].SetFreq(freq);
-          oscTri[i].SetFreq(freq);
-          triggerNote(i);  // Start envelope attack
-          Serial.print("Note LATCHED - Button ");
-          Serial.print(i + 1);
-          Serial.print(", MIDI Note: ");
-          Serial.print(note);
-          Serial.print(" (");
-          Serial.print(freq);
-          Serial.println(" Hz)");
-        } else {
-          // Note already latched, re-trigger envelope
-          int offsetToApply = windowOffsetSemitones;
-          // For non-chromatic scales, snap to scale degrees
-          if (currentScale != SCALE_CHROMATIC) {
-            int snappedOffsetDegrees = semitoneOffsetToNearestScaleDegree(windowOffsetSemitones);
-            offsetToApply = scaleDegreesToSemitones(snappedOffsetDegrees);
-          }
-          int note = currentScaleNotes[i] + offsetToApply;
-          float freq = mtof(note);
-          oscSine[i].SetFreq(freq);
-          oscTri[i].SetFreq(freq);
-          oscSine[i].Reset();
-          oscTri[i].Reset();
-          triggerNote(i);  // Retrigger envelope from start
-          Serial.print("Note RE-TRIGGERED - Button ");
-          Serial.println(i + 1);
-        }
-      }
-      // Ignore release in latch mode
     } else {
       // Normal: press = ON, release = OFF (single note mode)
       if (rising) {
